@@ -20,7 +20,7 @@ Open `index.html` in a modern browser. For the best experience, serve the folder
 
 ## Important prototype boundaries
 
-- Demo data only; this prototype is not connected to a bank, Money Manager, or Splitwise.
+- Demo data only; no real financial accounts are connected.
 - Records are stored in the current browser only and can be cleared through browser storage settings.
 - Voice recognition support depends on the browser and permission; all fields remain editable.
 - Friend reminders, account creation, budgets, authentication, and real settlement transfers are illustrative UI only.
@@ -32,4 +32,3 @@ The intended product model keeps personal financial accounts and categories sepa
 ## Stack
 
 Vanilla HTML, CSS, and JavaScript. No third-party runtime dependencies.
-

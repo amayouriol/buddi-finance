@@ -4,6 +4,8 @@
 
 Buddi is an early-stage portfolio prototype exploring a single experience for everyday budgeting and friend-to-friend expense sharing. The goal is to make personal transactions, shared bills, and who-owes-whom balances feel like one coherent picture.
 
+This repository contains a browser-based interface prototype for exploring the product concept and its core personal and shared expense workflows.
+
 ## Prototype features
 
 - Overview dashboard for balances, monthly spending, categories, and recent activity

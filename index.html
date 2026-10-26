@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#F4F6F8" />
+    <meta name="description" content="Buddi brings your budget and shared expenses together." />
+    <title>Buddi — Budgeting, together</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <a class="brand" href="#overview" aria-label="Buddi home">
+          <span class="brand-mark"><span></span><span></span><span></span></span>
+          <span>buddi<span class="brand-period">.</span></span>
+        </a>
+        <div class="workspace-switch">
+          <span class="workspace-avatar">A</span>
+          <span class="workspace-name"><strong>Alex's space</strong><small>Personal workspace</small></span>
+          <span class="chevron">⌄</span>
+        </div>
+        <div class="nav-label">WORKSPACE</div>
+        <nav class="main-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-view="overview"><span class="nav-icon">◫</span>Overview</button>
+          <button class="nav-item" data-view="transactions"><span class="nav-icon">↕</span>Transactions</button>
+          <button class="nav-item" data-view="shared"><span class="nav-icon">♡</span>Shared with you <span class="nav-count" id="shared-count">3</span></button>
+          <button class="nav-item" data-view="budgets"><span class="nav-icon">▤</span>Budgets</button>
+        </nav>
+        <div class="nav-label second-label">YOUR ACCOUNTS</div>
+        <div class="account-list" id="account-list"></div>
+        <button class="add-account" id="add-account">＋ Add account</button>
+        <div class="sidebar-bottom">
+          <div class="upgrade-card"><span class="upgrade-spark">✳</span><strong>Your money, together.</strong><p>Shared expenses and personal spending, finally in one place.</p><button id="learn-more">Explore the vision <span>↗</span></button></div>
+          <button class="profile-button"><span class="profile-avatar">AM</span><span><strong>Alex Morgan</strong><small>Free plan</small></span><span class="profile-more">···</span></button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobile-menu" aria-label="Open menu">☰</button>
+          <div class="breadcrumb"><span>Workspace</span><b>/</b><strong id="breadcrumb-title">Overview</strong></div>
+          <div class="topbar-actions"><button class="icon-button" aria-label="Search" id="search-toggle">⌕</button><button class="help-button" id="help-button">? <span>Help</span></button><div class="top-avatar">AM</div></div>
+        </header>
+
+        <section class="page view-panel" id="overview-view">
+          <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span><span id="today-label"></span></div><h1>Good morning, Alex <span class="wave">✳</span></h1><p class="subtitle">A little clarity goes a long way.</p></div><button class="primary-button" id="add-expense"><span>＋</span> Add transaction</button></div>
+
+          <div class="summary-grid">
+            <article class="summary-card balance-card"><div class="card-topline"><span>Total balance</span><button class="more-button">···</button></div><div class="summary-value">$<span id="total-balance">8,429</span><span class="cents">.36</span></div><div class="card-foot"><span class="trend-pill">↗ 4.8%</span><span>vs. last month</span><div class="balance-mini-chart"><i style="height:28%"></i><i style="height:37%"></i><i style="height:32%"></i><i style="height:49%"></i><i style="height:44%"></i><i style="height:61%"></i><i style="height:56%"></i><i style="height:76%"></i><i style="height:70%"></i><i style="height:93%"></i></div></div></article>
+            <article class="summary-card spend-card"><div class="card-topline"><span>Spent this month</span><span class="period-select">October 2026⌄</span></div><div class="summary-value">$<span id="spent-total">2,184</span><span class="cents">.50</span></div><div class="spend-progress"><div class="progress-track"><span></span></div><div class="progress-caption"><span>Monthly budget <strong>$3,200</strong></span><span><strong>68%</strong> used</span></div></div></article>
+            <article class="summary-card owe-card"><div class="card-topline"><span>Friends owe you</span><span class="round-icon green">↗</span></div><div class="summary-value">$<span id="owed-total">128</span><span class="cents">.40</span></div><div class="card-foot"><div class="avatar-stack"><span class="friend-avatar coral">J</span><span class="friend-avatar lavender">S</span><span class="friend-avatar yellow">M</span><span class="friend-avatar more-avatar">+1</span></div><span class="foot-note">Across 4 friends</span><button class="text-link" data-view="shared">View balances →</button></div></article>
+          </div>
+
+          <div class="content-grid">
+            <section class="panel transactions-panel">
+              <div class="panel-heading"><div><h2>Recent transactions</h2><p>Your money, as it moves.</p></div><button class="subtle-button" data-view="transactions">See all <span>→</span></button></div>
+              <div class="transaction-list" id="recent-transactions"></div>
+            </section>
+            <div class="right-column">
+              <section class="panel spending-panel"><div class="panel-heading"><div><h2>Spending</h2><p>Where it went this month.</p></div><button class="select-button">This month⌄</button></div><div class="spending-chart-wrap"><div class="donut-chart"><div class="donut-hole"><strong>$2,184</strong><small>total spent</small></div></div><div class="category-legend" id="category-legend"></div></div><div class="chart-footer"><span class="chart-footer-dot"></span>You're spending <strong>12% less</strong> than last month</div></section>
+              <section class="panel activity-panel"><div class="panel-heading"><div><h2>Shared activity</h2><p>Recent updates from your circle.</p></div><button class="more-button">···</button></div><div id="shared-activity"></div></section>
+            </div>
+          </div>
+          <footer class="page-footer"><span>Your budget, with a buddy.</span><span>Buddi is a portfolio concept · Your data stays in this browser</span></footer>
+        </section>
+
+        <section class="page view-panel hidden" id="transactions-view"><div class="page-heading compact-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>YOUR MONEY</div><h1>Transactions</h1><p class="subtitle">Every little thing, all in one place.</p></div><button class="primary-button" id="add-expense-transactions"><span>＋</span> Add transaction</button></div><div class="panel table-panel"><div class="table-toolbar"><div class="search-field">⌕ <input id="transaction-search" placeholder="Search transactions..." /></div><button class="filter-button">☷ Filters</button><button class="filter-button">↓ Export</button></div><div class="transaction-list full-list" id="all-transactions"></div></div></section>
+
+        <section class="page view-panel hidden" id="shared-view"><div class="page-heading compact-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>YOUR PEOPLE</div><h1>Shared with you</h1><p class="subtitle">Money between friends, made simple.</p></div><button class="primary-button" id="add-shared-expense"><span>＋</span> Split an expense</button></div><div class="shared-summary-row"><article class="shared-stat"><span>You're owed</span><strong>$128.40</strong><small>From 4 people</small></article><article class="shared-stat"><span>You owe</span><strong>$46.20</strong><small>Across 2 people</small></article><article class="shared-stat"><span>Settled this month</span><strong>$342.80</strong><small>Looking good ✨</small></article></div><div class="panel friends-panel"><div class="panel-heading"><div><h2>Your circle</h2><p>Balances update as you add and settle expenses.</p></div><button class="subtle-button" id="invite-friend">＋ Invite a friend</button></div><div id="friend-list"></div></div></section>
+
+        <section class="page view-panel hidden" id="budgets-view"><div class="page-heading compact-heading"><div><div class="eyebrow"><span class="eyebrow-dot"></span>SPENDING PLAN</div><h1>Budgets</h1><p class="subtitle">A little structure, a lot more ease.</p></div><button class="primary-button" id="add-budget"><span>＋</span> Create a budget</button></div><div class="budget-grid" id="budget-grid"></div></section>
+      </main>
+    </div>
+
+    <div class="modal-backdrop hidden" id="transaction-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-card"><div class="modal-head"><div><div class="eyebrow"><span class="eyebrow-dot"></span>QUICK ENTRY</div><h2 id="modal-title">Add a transaction</h2><p>Personal or shared, you're covered.</p></div><button class="close-button" id="close-modal" aria-label="Close">×</button></div>
+        <div class="entry-toggle"><button class="entry-tab active" data-entry="personal">Personal expense</button><button class="entry-tab" data-entry="shared">Shared expense</button></div>
+        <div class="voice-entry"><button class="mic-button" id="voice-button" aria-label="Dictate expense">♩</button><div><strong>Say it naturally</strong><small id="voice-status">Try “$42 groceries on BofA, split $14 with Jamie”</small></div><span class="voice-badge">VOICE</span></div>
+        <form id="expense-form">
+          <label class="field-label">What was it for?<input name="description" id="description" placeholder="e.g. Dinner at Pizzeria" required /></label>
+          <div class="form-row"><label class="field-label">Amount<input name="amount" id="amount" type="number" min="0.01" step="0.01" placeholder="0.00" required /></label><label class="field-label">Date<input name="date" id="date" type="date" required /></label></div>
+          <div class="form-row"><label class="field-label">Category<select name="category" id="category"><option>Groceries</option><option>Eating Out</option><option>Transport</option><option>House</option><option>Fun</option><option>Life style</option><option>Utilities</option><option>Other expense</option></select></label><label class="field-label">Paid from<select name="account" id="account"><option>BofA</option><option>IBK TC</option><option>Cash</option><option>Checking</option></select></label></div>
+          <div class="shared-fields hidden" id="shared-fields"><label class="field-label">Your share<input name="my-share" id="my-share" type="number" min="0" step="0.01" placeholder="What was your portion?" /></label><label class="field-label">Split with<input name="friends" id="friends" placeholder="Friend name(s), separated by commas" /></label><div class="split-preview" id="split-preview">Enter the total and your share to preview the split.</div></div>
+          <div class="form-error hidden" id="form-error"></div>
+          <div class="modal-actions"><button type="button" class="cancel-button" id="cancel-modal">Cancel</button><button type="submit" class="primary-button">Save transaction <span>→</span></button></div>
+        </form>
+      </div>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
+

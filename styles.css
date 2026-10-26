@@ -27,4 +27,6 @@ body{background:var(--paper);color:var(--ink)}
 .field-label input:focus,.field-label select:focus{border-color:#55A7E8;box-shadow:0 0 0 3px #55A7E820}
 .split-preview{background:#F4F6F8}
 .toast{background:#20252D}
+.eyebrow-dot,.balance-mini-chart i{background:#55A7E8}
+.wave{color:#55A7E8}
 

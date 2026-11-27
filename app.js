@@ -1,5 +1,5 @@
 const db = window.buddiSupabase;
-const state = { user: null, accounts: [], groups: [], members: [], transactions: [], friends: [], entryKind: 'personal', myShareEdited: false, authStep: 'email', onboardingCompleted: false, onboardingStep: 0, onboardingFinishing: false };
+const state = { user: null, accounts: [], groups: [], members: [], transactions: [], attachments: [], budgets: [], editingBudgetId: null, editingAccountId: null, editingTransactionId: null, friends: [], pendingReceipt: null, receiptPreviewUrl: null, entryKind: 'personal_expense', spendCurrency: null, myShareEdited: false, settlementMemberId: null, authStep: 'email', onboardingCompleted: false, onboardingStep: 0, onboardingFinishing: false };
 let installPrompt = null;
 const categories = [
   { name: 'Groceries', color: '#6eaa7d', icon: '🛒' }, { name: 'Eating Out', color: '#e8bb64', icon: '🍽' },
@@ -102,11 +102,15 @@ async function loadWorkspaceData() {
     db.from('groups').select('*').order('created_at', { ascending:false }),
     db.from('group_members').select('*').order('created_at'),
     db.from('transactions').select('*').eq('status', 'posted').order('occurred_at', { ascending:false }),
-    db.from('transaction_splits').select('*')
+    db.from('transaction_splits').select('*'),
+    db.from('attachments').select('id, transaction_id, storage_path, mime_type'),
+    db.from('budgets').select('*').order('category')
   ]);
   for (const result of results) if (result.error) throw result.error;
-  const [accounts, groups, members, transactions, splits] = results.map(result => result.data);
+  const [accounts, groups, members, transactions, splits, attachments, budgets] = results.map(result => result.data);
   state.accounts = accounts;
+  state.attachments = attachments;
+  state.budgets = budgets;
   state.members = members;
   state.groups = groups.map(group => Object.assign({}, group, { members:members.filter(member => member.group_id === group.id) }));
   const splitMap = new Map();
@@ -118,12 +122,17 @@ async function loadWorkspaceData() {
     const txSplits = splitMap.get(row.id) || [];
     const ownerSplit = txSplits.find(split => split.is_owner);
     return {
-      id:row.id, title:row.description, category:row.category || 'Other expense', account:own?.name || '', accountId:row.account_id,
+      id:row.id, title:row.description, category:row.category || '', account:own?.name || '', accountId:row.account_id,
       currency:row.currency, date:String(row.occurred_at).slice(0, 10), amount:Number(row.amount),
-      kind:row.type === 'shared_expense' ? 'shared' : 'personal', mine:Number(ownerSplit?.share_amount ?? row.amount),
+      kind:row.type === 'shared_expense' ? 'shared' : row.type, mine:Number(ownerSplit?.share_amount ?? row.amount),
+      sourceAccountId:row.source_account_id, sourceAccount:accountFor(row.source_account_id)?.name || '',
+      destinationAccountId:row.destination_account_id, destinationAccount:accountFor(row.destination_account_id)?.name || '',
+      destinationAmount:Number(row.destination_amount ?? row.amount), adjustmentDirection:row.adjustment_direction,
       friends:txSplits.filter(split => !split.is_owner).map(split => memberFor(split.group_member_id)?.display_name).filter(Boolean),
       groupName:group?.name || '', payerName:payer?.display_name || 'You', payerMemberId:row.payer_member_id,
-      groupId:row.group_id, splits:txSplits.filter(split => !split.is_owner)
+      counterpartyMemberId:row.counterparty_member_id, counterpartyName:memberFor(row.counterparty_member_id)?.display_name || '',
+      groupId:row.group_id, splits:txSplits.filter(split => !split.is_owner),
+      receiptPath:attachments.find(attachment => attachment.transaction_id === row.id)?.storage_path || ''
     };
   });
   calculateFriendBalances();
@@ -131,35 +140,74 @@ async function loadWorkspaceData() {
 
 function calculateFriendBalances() {
   const balances = new Map();
+  const addBalance = (memberId, groupId, currency, amount) => {
+    const member = memberFor(memberId);
+    if (!member) return;
+    const key = memberId + ':' + currency;
+    const current = balances.get(key) || { memberId, groupId, currency, name:member.display_name, balance:0 };
+    current.balance += amount;
+    balances.set(key, current);
+  };
   for (const tx of state.transactions) {
-    if (tx.kind !== 'shared') continue;
-    if (tx.payerMemberId) {
-      const payer = memberFor(tx.payerMemberId);
-      if (payer) balances.set(payer.display_name, (balances.get(payer.display_name) || 0) - tx.mine);
-    } else {
-      for (const split of tx.splits) { const friend = memberFor(split.group_member_id); if (friend) balances.set(friend.display_name, (balances.get(friend.display_name) || 0) + Number(split.share_amount)); }
+    if (tx.kind === 'shared') {
+      if (tx.payerMemberId) addBalance(tx.payerMemberId, tx.groupId, tx.currency, -tx.mine);
+      else for (const split of tx.splits) addBalance(split.group_member_id, tx.groupId, tx.currency, Number(split.share_amount));
+    } else if (tx.kind === 'settlement_received') {
+      addBalance(tx.counterpartyMemberId, tx.groupId, tx.currency, -tx.amount);
+    } else if (tx.kind === 'settlement_paid') {
+      addBalance(tx.counterpartyMemberId, tx.groupId, tx.currency, tx.amount);
     }
   }
   const colors = ['coral', 'lavender', 'yellow', 'blue', 'green'];
-  state.friends = [...balances].filter(([, balance]) => Math.abs(balance) >= 0.005).map(([name, balance], index) => ({
-    name, initial:name.charAt(0).toUpperCase(), color:colors[index % colors.length], note:'Shared expenses',
-    amount:Math.abs(balance), owes:balance >= 0, balance
-  }));
+  state.friends = [...balances.values()].filter(friend => Math.abs(friend.balance) >= 0.005).map((friend, index) => {
+    const group = groupFor(friend.groupId);
+    return Object.assign(friend, {
+      initial:friend.name.charAt(0).toUpperCase(), color:colors[index % colors.length], note:(group?.name || 'Shared expenses') + ' · ' + friend.currency,
+      amount:Math.abs(friend.balance), owes:friend.balance >= 0
+    });
+  });
 }
 
 function accountBalance(account) {
   let balance = Number(account.opening_balance || 0);
-  for (const tx of state.transactions) if (tx.accountId === account.id) balance -= tx.amount;
+  for (const tx of state.transactions) {
+    if (tx.kind === 'transfer') {
+      if (tx.sourceAccountId === account.id) balance -= tx.amount;
+      if (tx.destinationAccountId === account.id) balance += tx.destinationAmount;
+      continue;
+    }
+    if (tx.accountId !== account.id) continue;
+    if (tx.kind === 'settlement_received' || tx.kind === 'income' || (tx.kind === 'balance_adjustment' && tx.adjustmentDirection === 'increase')) balance += tx.amount;
+    else balance -= tx.amount;
+  }
   return balance;
 }
 
 function renderAccounts() {
   document.getElementById('account-list').innerHTML = state.accounts.map(account =>
-    '<div class="account-item"><span class="account-dot"></span>' + esc(account.name) + '<small>' + money(accountBalance(account), account.currency) + '</small></div>'
+    '<button type="button" class="account-item" data-edit-account="' + esc(account.id) + '" aria-label="Edit ' + esc(account.name) + ' account"><span class="account-dot"></span><span class="account-item-name">' + esc(account.name) + '</span><small>' + money(accountBalance(account), account.currency) + '</small></button>'
   ).join('');
   document.getElementById('account').innerHTML = state.accounts.map(account =>
     '<option value="' + esc(account.id) + '">' + esc(account.name) + ' · ' + esc(account.currency) + '</option>'
   ).join('');
+  document.getElementById('source-account').innerHTML = state.accounts.map(account =>
+    '<option value="' + esc(account.id) + '">' + esc(account.name) + ' · ' + esc(account.currency) + '</option>'
+  ).join('');
+  updateTransferDestinationOptions();
+}
+
+function updateTransferDestinationOptions() {
+  const source = accountFor(document.getElementById('source-account').value);
+  const destinationSelect = document.getElementById('destination-account');
+  const previous = destinationSelect.value;
+  const options = state.accounts.filter(account => source && account.currency === source.currency && account.id !== source.id);
+  destinationSelect.innerHTML = options.length
+    ? options.map(account => '<option value="' + esc(account.id) + '">' + esc(account.name) + ' · ' + esc(account.currency) + '</option>').join('')
+    : '<option value="">Add another ' + esc(source?.currency || '') + ' account</option>';
+  if (options.some(account => account.id === previous)) destinationSelect.value = previous;
+  document.getElementById('transfer-help').textContent = options.length
+    ? 'Only accounts in ' + source.currency + ' are available; cross-currency transfers need an exchange-rate rule first.'
+    : 'Add another ' + (source?.currency || '') + ' account before recording a transfer.';
 }
 
 function renderGroupOptions() {
@@ -177,46 +225,242 @@ function renderGroups() {
 }
 function rowMarkup(tx) {
   const shared = tx.kind === 'shared';
+  const settlement = tx.kind === 'settlement_received' || tx.kind === 'settlement_paid';
+  const transfer = tx.kind === 'transfer';
+  const adjustment = tx.kind === 'balance_adjustment';
   const category = categories.find(item => item.name === tx.category);
-  const detail = shared
+  const detail = settlement
+    ? esc(tx.groupName || 'Shared') + ' · ' + esc(tx.account || 'Personal account') + ' · ' + dateLabel(tx.date)
+    : transfer
+    ? esc(tx.sourceAccount || 'Source') + ' → ' + esc(tx.destinationAccount || 'Destination') + ' · ' + dateLabel(tx.date)
+    : shared
     ? 'Total ' + money(tx.amount, tx.currency) + ' · ' + esc(tx.groupName || 'Shared') + ' · ' + esc(tx.account ? 'from ' + tx.account : 'no personal account movement') + ' · paid by ' + esc(tx.payerName) + ' · ' + dateLabel(tx.date)
     : esc(tx.account || 'Personal') + ' · ' + dateLabel(tx.date);
-  return '<div class="transaction-row"><div class="transaction-icon ' + (shared ? 'icon-split' : 'icon-food') + '">' + (category?.icon || '•') + '</div><div class="transaction-info"><strong>' + esc(tx.title) + (shared ? '<span class="shared-tag">SHARED</span>' : '') + '</strong><small>' + esc(tx.category) + ' · ' + detail + '</small></div><div class="transaction-meta"><strong>−' + money(shared ? tx.mine : tx.amount, tx.currency) + '</strong><small>' + (shared ? 'Your share' : 'Personal') + '</small></div></div>';
+  const incoming = tx.kind === 'settlement_received';
+  const positive = incoming || tx.kind === 'income' || (adjustment && tx.adjustmentDirection === 'increase');
+  const label = settlement ? (incoming ? 'Repayment received' : 'Repayment sent') : transfer ? 'Transfer' : adjustment ? 'Balance adjustment' : shared ? 'Your share' : tx.kind === 'income' ? 'Income' : 'Personal';
+  const sign = transfer ? '' : positive ? '+' : '−';
+  const editable = ['personal_expense', 'income', 'balance_adjustment', 'transfer'].includes(tx.kind);
+  return '<div class="transaction-row"><div class="transaction-icon ' + (shared || settlement || transfer ? 'icon-split' : 'icon-food') + '">' + (category?.icon || (settlement || transfer ? '↔' : adjustment ? '±' : '•')) + '</div><div class="transaction-info"><strong>' + esc(tx.title) + (shared ? '<span class="shared-tag">SHARED</span>' : '') + '</strong><small>' + esc(settlement || transfer ? label : tx.category || label) + ' · ' + detail + '</small>' + (tx.receiptPath ? '<button type="button" class="receipt-open" data-receipt-path="' + esc(tx.receiptPath) + '">View receipt</button>' : '') + '</div><div class="transaction-meta"><strong>' + sign + money(shared ? tx.mine : tx.amount, tx.currency) + '</strong><small>' + label + '</small>' + (editable ? '<button type="button" class="transaction-edit" data-edit-transaction="' + esc(tx.id) + '">Edit</button>' : '') + '</div></div>';
 }
+
+function clearReceiptSelection() {
+  if (state.receiptPreviewUrl) URL.revokeObjectURL(state.receiptPreviewUrl);
+  state.receiptPreviewUrl = null;
+  state.pendingReceipt = null;
+  document.getElementById('receipt-file').value = '';
+  document.getElementById('receipt-preview').classList.add('hidden');
+  document.getElementById('receipt-preview-image').removeAttribute('src');
+  document.getElementById('receipt-ai-status').textContent = '';
+}
+
+async function compactReceiptImage(file) {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const maxSide = Math.max(bitmap.width, bitmap.height);
+    let scale = Math.min(1, 1800 / maxSide);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', attempt ? 0.72 : 0.82));
+      if (!blob) throw new Error('Could not prepare this image. Try another photo.');
+      if (blob.size <= 1536 * 1024) return blob;
+      scale *= 0.65;
+    }
+  } finally { bitmap.close(); }
+  throw new Error('This receipt image is too large to read. Try a smaller photo.');
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(new Error('Could not read this image. Try again.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function readReceiptWithAi() {
+  const button = document.getElementById('read-receipt');
+  const status = document.getElementById('receipt-ai-status');
+  if (!state.pendingReceipt) { status.textContent = 'Choose a receipt photo first.'; return; }
+  setBusy(button, true, 'Read receipt');
+  status.textContent = 'Preparing the image…';
+  try {
+    const image = await compactReceiptImage(state.pendingReceipt);
+    const imageBase64 = await blobToBase64(image);
+    status.textContent = 'Sending this receipt image to Google AI…';
+    const result = await db.functions.invoke('parse-receipt', { body: { mimeType:'image/jpeg', imageBase64 } });
+    if (result.error) {
+      let message = result.error.message || 'Could not read the receipt. Enter details manually.';
+      try { message = (await result.error.context.json()).error || message; } catch {}
+      throw new Error(message);
+    }
+    const draft = result.data?.draft;
+    if (!draft) throw new Error('No receipt draft was returned. Enter details manually.');
+    if (draft.description) document.getElementById('description').value = draft.description;
+    if (Number(draft.amount) > 0) document.getElementById('amount').value = draft.amount;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(draft.date || '')) document.getElementById('date').value = draft.date;
+    if ([...document.getElementById('category').options].some(option => option.value === draft.category || option.text === draft.category)) document.getElementById('category').value = draft.category;
+    if (draft.currency === 'USD' || draft.currency === 'PEN') {
+      const matchingAccount = state.accounts.find(account => account.currency === draft.currency);
+      if (matchingAccount) document.getElementById('account').value = matchingAccount.id;
+    }
+    updateSplitPreview();
+    status.textContent = (draft.clarifyingQuestion ? draft.clarifyingQuestion + ' ' : '') + 'Draft filled in. Check the date, currency, account, and every field before saving.';
+  } catch (error) {
+    status.textContent = error.message || 'Could not read the receipt. Enter details manually.';
+  } finally { setBusy(button, false, 'Read receipt'); }
+}
+
+async function attachReceipt(transactionId) {
+  const file = state.pendingReceipt;
+  if (!file) return;
+  const extension = { 'image/jpeg':'jpg', 'image/png':'png', 'image/webp':'webp' }[file.type];
+  if (!extension) throw new Error('Choose a JPEG, PNG, or WebP receipt photo.');
+  const path = state.user.id + '/' + transactionId + '/' + crypto.randomUUID() + '.' + extension;
+  const bucket = db.storage.from('buddi-receipts');
+  const uploaded = await bucket.upload(path, file, { contentType:file.type, cacheControl:'3600', upsert:false });
+  if (uploaded.error) throw uploaded.error;
+  const attached = await db.from('attachments').insert({ transaction_id:transactionId, storage_path:path, mime_type:file.type });
+  if (attached.error) {
+    await bucket.remove([path]);
+    throw attached.error;
+  }
+  return path;
+}
+
+async function removeReceiptPath(path) {
+  if (path) await db.storage.from('buddi-receipts').remove([path]);
+}
+
+async function openPrivateReceipt(path) {
+  const tab = window.open('about:blank', '_blank');
+  if (!tab) { showToast('Allow pop-ups to view this private receipt.'); return; }
+  try {
+    const result = await db.storage.from('buddi-receipts').createSignedUrl(path, 60);
+    if (result.error) throw result.error;
+    tab.location.href = result.data.signedUrl;
+  } catch (error) {
+    tab.close();
+    showToast(error.message || 'Could not open this receipt.');
+  }
+}
+function filteredTransactions() {
+  const search = document.getElementById('transaction-search').value.trim().toLowerCase();
+  const type = document.getElementById('filter-type').value;
+  const currency = document.getElementById('filter-currency').value;
+  const start = document.getElementById('filter-start-date').value;
+  const end = document.getElementById('filter-end-date').value;
+  const status = document.getElementById('transaction-filter-status');
+  if (start && end && start > end) {
+    status.textContent = 'Start date must be on or before the end date.';
+    status.classList.add('filter-error');
+    return [];
+  }
+  status.classList.remove('filter-error');
+  const matches = state.transactions.filter(tx => {
+    const kindMatch = type === 'all' || (type === 'settlement' ? tx.kind.startsWith('settlement_') : tx.kind === type);
+    const searchText = [tx.title, tx.category, tx.account, tx.sourceAccount, tx.destinationAccount, tx.groupName, tx.payerName].join(' ').toLowerCase();
+    return kindMatch && (currency === 'all' || tx.currency === currency) && (!start || tx.date >= start) && (!end || tx.date <= end) && (!search || searchText.includes(search));
+  });
+  status.textContent = matches.length === state.transactions.length
+    ? matches.length + ' transactions'
+    : 'Showing ' + matches.length + ' of ' + state.transactions.length + ' transactions';
+  return matches;
+}
+
 function renderTransactions() {
   const empty = '<div class="empty-state">No transactions yet. Add one to start your personal ledger.</div>';
   document.getElementById('recent-transactions').innerHTML = state.transactions.length ? state.transactions.slice(0, 7).map(rowMarkup).join('') : empty;
-  document.getElementById('all-transactions').innerHTML = state.transactions.length ? state.transactions.map(rowMarkup).join('') : empty;
+  const matches = filteredTransactions();
+  const hasFilters = document.getElementById('transaction-search').value || document.getElementById('filter-type').value !== 'all' || document.getElementById('filter-currency').value !== 'all' || document.getElementById('filter-start-date').value || document.getElementById('filter-end-date').value;
+  document.getElementById('all-transactions').innerHTML = matches.length ? matches.map(rowMarkup).join('') : hasFilters ? '<div class="empty-state">No transactions match these filters.</div>' : empty;
 }
-function personalSpend(tx) { return tx.kind === 'shared' ? tx.mine : tx.amount; }
+
+function csvCell(value) {
+  let text = String(value ?? '');
+  if (/^[=+\-@]/.test(text.trimStart())) text = "'" + text;
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
+function exportTransactionsCsv() {
+  const rows = filteredTransactions();
+  if (!rows.length) { showToast('There are no matching transactions to export.'); return; }
+  const labels = { personal_expense:'Personal expense', income:'Income', shared:'Shared expense', transfer:'Transfer', balance_adjustment:'Balance adjustment', settlement_received:'Repayment received', settlement_paid:'Repayment sent' };
+  const header = ['Date', 'Type', 'Description', 'Category', 'Total amount', 'Currency', 'Account', 'From account', 'To account', 'Group', 'Paid by', 'Your share'];
+  const lines = [header, ...rows.map(tx => [
+    tx.date, labels[tx.kind] || tx.kind, tx.title, tx.category,
+    Number(tx.amount).toFixed(2), tx.currency, tx.account, tx.sourceAccount, tx.destinationAccount,
+    tx.groupName, tx.kind === 'shared' ? tx.payerName : '', tx.kind === 'shared' ? Number(tx.mine).toFixed(2) : ''
+  ])].map(row => row.map(csvCell).join(','));
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type:'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'buddi-transactions-' + new Date().toISOString().slice(0, 10) + '.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast(rows.length + ' transactions exported.');
+}
+function personalSpend(tx) { return tx.kind === 'shared' ? tx.mine : tx.kind === 'personal_expense' ? tx.amount : 0; }
+
+function formatCurrencyTotals(rows, fallbackCurrency = 'USD') {
+  const totals = new Map();
+  for (const row of rows) totals.set(row.currency, (totals.get(row.currency) || 0) + row.amount);
+  return totals.size ? [...totals].map(([currency, amount]) => money(amount, currency)).join(' · ') : money(0, fallbackCurrency);
+}
+
+function setCurrencyTotal(elementId, value) {
+  const element = document.getElementById(elementId);
+  element.textContent = value;
+  element.classList.toggle('multi-currency', value.includes(' · '));
+}
 
 function renderSummary() {
-  const totalBalance = state.accounts.reduce((sum, account) => sum + accountBalance(account), 0);
   const monthly = state.transactions.filter(tx => monthKey(tx.date) === currentMonth);
-  const spent = monthly.reduce((sum, tx) => sum + personalSpend(tx), 0);
-  const owed = state.friends.filter(friend => friend.balance > 0).reduce((sum, friend) => sum + friend.balance, 0);
-  const due = state.friends.filter(friend => friend.balance < 0).reduce((sum, friend) => sum + Math.abs(friend.balance), 0);
   const currency = state.accounts[0]?.currency || 'USD';
-  document.getElementById('total-balance').textContent = money(totalBalance, currency);
-  document.getElementById('spent-total').textContent = money(spent, currency);
-  document.getElementById('spend-caption').textContent = money(spent, currency);
+  const balances = state.accounts.map(account => ({ currency:account.currency, amount:accountBalance(account) }));
+  const spending = monthly.map(tx => ({ currency:tx.currency, amount:personalSpend(tx) })).filter(row => row.amount > 0);
+  const repayments = monthly.filter(tx => tx.kind === 'settlement_received' || tx.kind === 'settlement_paid').map(tx => ({ currency:tx.currency, amount:tx.amount }));
+  const owedRows = state.friends.filter(friend => friend.balance > 0).map(friend => ({ currency:friend.currency, amount:friend.balance }));
+  const dueRows = state.friends.filter(friend => friend.balance < 0).map(friend => ({ currency:friend.currency, amount:Math.abs(friend.balance) }));
+  setCurrencyTotal('total-balance', formatCurrencyTotals(balances, currency));
+  const spentText = formatCurrencyTotals(spending, currency);
+  setCurrencyTotal('spent-total', spentText);
+  document.getElementById('spend-caption').textContent = spentText;
   document.getElementById('spend-period').textContent = new Date().toLocaleDateString('en-US', { month:'long', year:'numeric' });
-  document.getElementById('owed-total').textContent = money(owed, currency);
-  document.getElementById('owed-caption').textContent = state.friends.filter(friend => friend.balance > 0).length + ' people owe you';
-  document.getElementById('shared-owed').textContent = money(owed, currency);
-  document.getElementById('shared-due').textContent = money(due, currency);
+  setCurrencyTotal('owed-total', formatCurrencyTotals(owedRows, currency));
+  document.getElementById('owed-caption').textContent = owedRows.length + ' people owe you';
+  setCurrencyTotal('shared-owed', formatCurrencyTotals(owedRows, currency));
+  setCurrencyTotal('shared-due', formatCurrencyTotals(dueRows, currency));
   document.getElementById('shared-owed-count').textContent = state.friends.filter(friend => friend.balance > 0).length + ' people';
   document.getElementById('shared-due-count').textContent = state.friends.filter(friend => friend.balance < 0).length + ' people';
+  setCurrencyTotal('settled-total', formatCurrencyTotals(repayments, currency));
+  document.getElementById('settled-caption').textContent = repayments.length + ' repayments this month';
   document.getElementById('spend-progress-bar').style.width = '0%';
 }
 
 function renderLegend() {
-  const monthly = state.transactions.filter(tx => monthKey(tx.date) === currentMonth);
+  const currencySelect = document.getElementById('spend-currency');
+  const availableCurrencies = [...new Set([
+    ...state.accounts.map(account => account.currency),
+    ...state.transactions.filter(tx => personalSpend(tx) > 0).map(tx => tx.currency)
+  ])].sort();
+  if (!availableCurrencies.length) availableCurrencies.push('USD');
+  if (!availableCurrencies.includes(state.spendCurrency)) state.spendCurrency = availableCurrencies.includes(state.accounts[0]?.currency) ? state.accounts[0].currency : availableCurrencies[0];
+  currencySelect.innerHTML = availableCurrencies.map(currency => '<option value="' + esc(currency) + '">' + esc(currency) + '</option>').join('');
+  currencySelect.value = state.spendCurrency;
+  const monthly = state.transactions.filter(tx => monthKey(tx.date) === currentMonth && tx.currency === state.spendCurrency);
   const totals = new Map();
-  for (const tx of monthly) totals.set(tx.category, (totals.get(tx.category) || 0) + personalSpend(tx));
+  for (const tx of monthly) if (personalSpend(tx) > 0 && tx.category) totals.set(tx.category, (totals.get(tx.category) || 0) + personalSpend(tx));
   const total = [...totals.values()].reduce((sum, amount) => sum + amount, 0);
   const active = categories.filter(category => (totals.get(category.name) || 0) > 0);
-  document.getElementById('chart-total').textContent = money(total, state.accounts[0]?.currency || 'USD');
+  document.getElementById('chart-total').textContent = money(total, state.spendCurrency);
   if (!active.length) {
     document.getElementById('category-legend').innerHTML = '<div class="empty-state">Your category breakdown will appear here.</div>';
     document.getElementById('spend-donut').style.background = 'conic-gradient(#e9eee9 0 100%)';
@@ -239,12 +483,183 @@ function renderFriends() {
   const list = document.getElementById('friend-list');
   list.innerHTML = state.friends.length ? state.friends.map(friend => {
     const balance = Number(friend.balance || 0);
-    return '<div class="friend-row"><span class="friend-avatar ' + friend.color + '">' + esc(friend.initial) + '</span><span class="friend-name"><strong>' + esc(friend.name) + '</strong><small>' + esc(friend.note) + '</small></span><span class="friend-balance"><strong class="' + (balance > 0 ? 'positive' : '') + '">' + (balance > 0 ? 'Owes you ' : 'You owe ') + money(Math.abs(balance)) + '</strong><button class="settle-button" type="button" disabled title="Settlement recording is not connected yet">Settlement soon</button></span></div>';
+    const hasAccount = state.accounts.some(account => account.currency === friend.currency);
+    return '<div class="friend-row"><span class="friend-avatar ' + friend.color + '">' + esc(friend.initial) + '</span><span class="friend-name"><strong>' + esc(friend.name) + '</strong><small>' + esc(friend.note) + '</small></span><span class="friend-balance"><strong class="' + (balance > 0 ? 'positive' : '') + '">' + (balance > 0 ? 'Owes you ' : 'You owe ') + money(Math.abs(balance), friend.currency) + '</strong><button class="settle-button" type="button" data-settle-member="' + esc(friend.memberId) + '" ' + (hasAccount ? '' : 'disabled title="Add a ' + esc(friend.currency) + ' account to record this repayment"') + '>Record payment</button></span></div>';
   }).join('') : '<div class="empty-state">People and balances appear here when you add a shared expense to a group.</div>';
   document.getElementById('shared-count').textContent = state.friends.filter(friend => friend.balance > 0).length;
 }
-function renderBudgets() { document.getElementById('budget-grid').innerHTML = '<div class="empty-state">Budgets are not connected to the local database yet.</div>'; }
+function renderBudgets() {
+  const month = currentMonth;
+  if (!state.budgets.length) {
+    document.getElementById('budget-grid').innerHTML = '<div class="empty-state">No budgets yet. Set a monthly limit for a category to track your spending.</div>';
+    return;
+  }
+  document.getElementById('budget-grid').innerHTML = state.budgets.map(budget => {
+    const spent = state.transactions.filter(tx => monthKey(tx.date) === month && tx.currency === budget.currency && tx.category === budget.category).reduce((total, tx) => total + personalSpend(tx), 0);
+    const limit = Number(budget.monthly_limit);
+    const percent = limit > 0 ? Math.round(spent / limit * 100) : 0;
+    const width = Math.min(100, percent);
+    const remaining = limit - spent;
+    const category = categories.find(item => item.name === budget.category);
+    return '<article class="budget-card ' + (remaining < 0 ? 'over-budget' : '') + '"><div class="budget-top"><span class="budget-category"><i style="background:' + (category?.color || '#66a978') + '"></i><strong>' + esc(budget.category) + '</strong></span><span class="budget-actions"><button type="button" data-edit-budget="' + esc(budget.id) + '">Edit</button><button type="button" data-delete-budget="' + esc(budget.id) + '">Delete</button></span></div><div class="budget-amount">' + money(spent, budget.currency) + ' <small>of ' + money(limit, budget.currency) + '</small></div><div class="budget-bar" role="progressbar" aria-label="' + esc(budget.category) + ' budget used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.min(100, percent) + '"><span style="width:' + width + '%"></span></div><div class="budget-caption"><span>' + (remaining >= 0 ? money(remaining, budget.currency) + ' left' : money(Math.abs(remaining), budget.currency) + ' over') + '</span><small>' + percent + '% · ' + new Date(month + '-01T12:00:00').toLocaleDateString('en-US', { month:'long', year:'numeric' }) + '</small></div></article>';
+  }).join('');
+}
 function renderAll() { renderAccounts(); renderTransactions(); renderLegend(); renderActivities(); renderFriends(); renderBudgets(); renderGroupOptions(); renderGroups(); renderSummary(); }
+
+function refreshBudgetCategoryOptions(selected = '') {
+  const currency = document.getElementById('budget-currency').value;
+  const taken = new Set(state.budgets.filter(budget => budget.currency === currency && budget.id !== state.editingBudgetId).map(budget => budget.category));
+  const available = categories.filter(category => !taken.has(category.name));
+  const select = document.getElementById('budget-category');
+  select.innerHTML = available.map(category => '<option value="' + esc(category.name) + '">' + esc(category.name) + '</option>').join('');
+  if (available.some(category => category.name === selected)) select.value = selected;
+}
+
+function openBudgetModal(budget = null) {
+  state.editingBudgetId = budget?.id || null;
+  const form = document.getElementById('budget-form');
+  form.reset();
+  document.getElementById('budget-form-error').classList.add('hidden');
+  document.getElementById('budget-modal-title').textContent = budget ? 'Edit budget' : 'Create a budget';
+  document.getElementById('save-budget').innerHTML = budget ? 'Save changes <span>→</span>' : 'Save budget <span>→</span>';
+  const currencies = [...new Set([...state.accounts.map(account => account.currency), ...state.budgets.map(item => item.currency)])];
+  document.getElementById('budget-currency').innerHTML = currencies.map(currency => '<option value="' + esc(currency) + '">' + esc(currency) + '</option>').join('');
+  const preferredCurrency = budget?.currency || (currencies.includes(state.spendCurrency) ? state.spendCurrency : currencies[0] || 'USD');
+  if (currencies.includes(preferredCurrency)) document.getElementById('budget-currency').value = preferredCurrency;
+  refreshBudgetCategoryOptions(budget?.category || '');
+  if (budget) document.getElementById('budget-limit').value = Number(budget.monthly_limit).toFixed(2);
+  document.getElementById('budget-modal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => document.getElementById('budget-category').focus(), 80);
+}
+
+function closeBudgetModal() {
+  document.getElementById('budget-modal').classList.add('hidden');
+  document.body.style.overflow = '';
+  document.getElementById('budget-form').reset();
+  document.getElementById('budget-form-error').classList.add('hidden');
+  state.editingBudgetId = null;
+}
+
+async function saveBudget(event) {
+  event.preventDefault();
+  const errorBox = document.getElementById('budget-form-error');
+  const category = document.getElementById('budget-category').value;
+  const currency = document.getElementById('budget-currency').value;
+  const limit = Math.round(Number(document.getElementById('budget-limit').value) * 100) / 100;
+  errorBox.classList.add('hidden');
+  if (!category || !currency || !Number.isFinite(limit) || limit <= 0) {
+    errorBox.textContent = 'Choose a category and currency, then enter a monthly limit above zero.';
+    errorBox.classList.remove('hidden');
+    return;
+  }
+  if (state.budgets.some(budget => budget.id !== state.editingBudgetId && budget.category === category && budget.currency === currency)) {
+    errorBox.textContent = 'A budget already exists for this category and currency. Edit that budget instead.';
+    errorBox.classList.remove('hidden');
+    return;
+  }
+  const button = document.getElementById('save-budget');
+  const label = state.editingBudgetId ? 'Save changes →' : 'Save budget →';
+  setBusy(button, true);
+  try {
+    const result = state.editingBudgetId
+      ? await db.from('budgets').update({ category, currency, monthly_limit:limit }).eq('id', state.editingBudgetId).select().single()
+      : await db.from('budgets').insert({ category, currency, monthly_limit:limit }).select().single();
+    if (result.error) throw result.error;
+    const index = state.budgets.findIndex(budget => budget.id === result.data.id);
+    if (index < 0) state.budgets.push(result.data); else state.budgets[index] = result.data;
+    closeBudgetModal();
+    renderBudgets();
+    showToast('Monthly budget saved.');
+  } catch (error) {
+    errorBox.textContent = error.message || 'Could not save this budget.';
+    errorBox.classList.remove('hidden');
+  } finally { setBusy(button, false, label); }
+}
+
+async function deleteBudget(budgetId) {
+  const budget = state.budgets.find(item => item.id === budgetId);
+  if (!budget || !window.confirm('Delete the ' + budget.category + ' budget for ' + budget.currency + '?')) return;
+  const result = await db.from('budgets').delete().eq('id', budgetId);
+  if (result.error) { showToast(result.error.message || 'Could not delete this budget.'); return; }
+  state.budgets = state.budgets.filter(item => item.id !== budgetId);
+  renderBudgets();
+  showToast('Budget deleted.');
+}
+
+function openSettlementModal(memberId) {
+  const friend = state.friends.find(item => item.memberId === memberId);
+  if (!friend) return;
+  state.settlementMemberId = memberId;
+  const incoming = friend.balance > 0;
+  const amount = Math.abs(friend.balance);
+  const matchingAccounts = state.accounts.filter(account => account.currency === friend.currency);
+  document.getElementById('settlement-form').reset();
+  document.getElementById('settlement-modal-title').textContent = incoming ? 'Record money received' : 'Record a repayment';
+  document.getElementById('settlement-context').textContent = incoming
+    ? friend.name + ' is paying you back · ' + friend.note
+    : 'You are paying ' + friend.name + ' · ' + friend.note;
+  document.getElementById('settlement-amount').value = amount.toFixed(2);
+  document.getElementById('settlement-amount').max = amount.toFixed(2);
+  document.getElementById('settlement-date').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('settlement-account-label').textContent = incoming ? 'Deposit into' : 'Pay from';
+  document.getElementById('settlement-account').innerHTML = matchingAccounts.map(account =>
+    '<option value="' + esc(account.id) + '">' + esc(account.name) + ' · ' + esc(account.currency) + '</option>'
+  ).join('');
+  document.getElementById('settlement-account').disabled = !matchingAccounts.length;
+  document.getElementById('settlement-help').textContent = matchingAccounts.length
+    ? 'This payment reduces the outstanding balance. You can record a smaller amount for a partial payment.'
+    : 'Add a ' + friend.currency + ' account before recording this payment.';
+  document.getElementById('settlement-error').classList.add('hidden');
+  document.getElementById('save-settlement').disabled = !matchingAccounts.length;
+  document.getElementById('settlement-modal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  setTimeout(() => document.getElementById('settlement-amount').focus(), 80);
+}
+
+function closeSettlementModal() {
+  document.getElementById('settlement-modal').classList.add('hidden');
+  document.body.style.overflow = '';
+  document.getElementById('settlement-form').reset();
+  document.getElementById('settlement-error').classList.add('hidden');
+  state.settlementMemberId = null;
+}
+
+async function saveSettlement(event) {
+  event.preventDefault();
+  const friend = state.friends.find(item => item.memberId === state.settlementMemberId);
+  const errorBox = document.getElementById('settlement-error');
+  errorBox.classList.add('hidden');
+  if (!friend) { closeSettlementModal(); return; }
+  const amount = Math.round(Number(document.getElementById('settlement-amount').value) * 100) / 100;
+  const date = document.getElementById('settlement-date').value;
+  const account = accountFor(document.getElementById('settlement-account').value);
+  if (!amount || amount <= 0 || amount - Math.abs(friend.balance) > 0.001 || !date || !account || account.currency !== friend.currency) {
+    errorBox.textContent = 'Enter a valid amount up to the outstanding balance and choose an account in ' + friend.currency + '.';
+    errorBox.classList.remove('hidden');
+    return;
+  }
+  const incoming = friend.balance > 0;
+  const button = document.getElementById('save-settlement');
+  setBusy(button, true);
+  try {
+    const result = await db.from('transactions').insert({
+      type:incoming ? 'settlement_received' : 'settlement_paid', status:'posted',
+      description:incoming ? 'Repayment from ' + friend.name : 'Repayment to ' + friend.name,
+      occurred_at:date + 'T12:00:00', amount, currency:friend.currency,
+      account_id:account.id, group_id:friend.groupId, counterparty_member_id:friend.memberId,
+      confirmed_at:new Date().toISOString()
+    });
+    if (result.error) throw result.error;
+    await loadWorkspaceData();
+    renderAll();
+    closeSettlementModal();
+    showToast('Payment recorded. The shared balance and account were updated.');
+  } catch (error) {
+    errorBox.textContent = error.message || 'Could not record this payment.';
+    errorBox.classList.remove('hidden');
+  } finally { setBusy(button, false, 'Record payment →'); }
+}
 
 function openSetup(step = 0) {
   state.onboardingStep = step;
@@ -349,9 +764,19 @@ async function completeOnboarding() {
   closeSetup();
 }
 
-function openAccountModal() {
+function openAccountModal(account = null) {
+  state.editingAccountId = account?.id || null;
   document.getElementById('account-form').reset();
-  document.getElementById('new-account-balance').value = '0.00';
+  document.getElementById('account-modal-title').textContent = account ? 'Edit account' : 'Add an account';
+  document.querySelector('#account-form button[type="submit"]').innerHTML = account ? 'Save changes <span>→</span>' : 'Save account <span>→</span>';
+  document.getElementById('new-account-balance').value = account ? Number(account.opening_balance).toFixed(2) : '0.00';
+  document.getElementById('new-account-name').value = account?.name || '';
+  document.getElementById('new-account-currency').value = account?.currency || 'USD';
+  const hasHistory = account && state.transactions.some(tx => tx.accountId === account.id || tx.sourceAccountId === account.id || tx.destinationAccountId === account.id);
+  document.getElementById('new-account-currency').disabled = Boolean(hasHistory);
+  document.getElementById('account-currency-help').textContent = hasHistory
+    ? 'This account has transactions. Its currency is locked so the existing amounts stay accurate.'
+    : 'Changing the currency affects how this account\'s balance is shown. It can\'t change after transactions are recorded.';
   document.getElementById('account-form-error').classList.add('hidden');
   document.getElementById('account-modal').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
@@ -360,6 +785,10 @@ function openAccountModal() {
 function closeAccountModal() {
   document.getElementById('account-modal').classList.add('hidden');
   document.body.style.overflow = '';
+  document.getElementById('account-form').reset();
+  document.getElementById('new-account-currency').disabled = false;
+  document.getElementById('account-form-error').classList.add('hidden');
+  state.editingAccountId = null;
 }
 async function saveAccount(event) {
   event.preventDefault();
@@ -367,20 +796,26 @@ async function saveAccount(event) {
   const currency = document.getElementById('new-account-currency').value;
   const balance = Number(document.getElementById('new-account-balance').value);
   const errorBox = document.getElementById('account-form-error');
+  const existing = state.accounts.find(account => account.id === state.editingAccountId);
   errorBox.classList.add('hidden');
   if (!name || !Number.isFinite(balance)) { errorBox.textContent = 'Enter an account name and a valid starting balance.'; errorBox.classList.remove('hidden'); return; }
-  if (state.accounts.some(account => account.name.toLowerCase() === name.toLowerCase())) { errorBox.textContent = 'An account with this name already exists.'; errorBox.classList.remove('hidden'); return; }
+  if (state.accounts.some(account => account.id !== existing?.id && account.name.toLowerCase() === name.toLowerCase())) { errorBox.textContent = 'An account with this name already exists.'; errorBox.classList.remove('hidden'); return; }
+  const hasHistory = existing && state.transactions.some(tx => tx.accountId === existing.id || tx.sourceAccountId === existing.id || tx.destinationAccountId === existing.id);
+  if (hasHistory && currency !== existing.currency) { errorBox.textContent = 'Currency is locked because this account has recorded transactions.'; errorBox.classList.remove('hidden'); return; }
   const button = document.querySelector('#account-form button[type="submit"]');
+  const label = existing ? 'Save changes →' : 'Save account →';
   setBusy(button, true);
   try {
-    const inserted = await db.from('accounts').insert({ name, currency, opening_balance:balance });
-    if (inserted.error) throw inserted.error;
+    const result = existing
+      ? await db.from('accounts').update({ name, currency, opening_balance:balance }).eq('id', existing.id)
+      : await db.from('accounts').insert({ name, currency, opening_balance:balance });
+    if (result.error) throw result.error;
     await loadWorkspaceData();
     renderAll();
     closeAccountModal();
-    showToast(name + ' account added.');
+    showToast(existing ? name + ' account updated.' : name + ' account added.');
   } catch (error) { errorBox.textContent = error.message || 'Could not save this account.'; errorBox.classList.remove('hidden'); }
-  finally { setBusy(button, false, 'Save account →'); }
+  finally { setBusy(button, false, label); }
 }
 
 function setView(view) {
@@ -392,7 +827,8 @@ function setView(view) {
   document.getElementById('sidebar').classList.remove('open');
   window.scrollTo({ top:0, behavior:'smooth' });
 }
-function openModal(kind = 'personal', groupName = '') {
+function openModal(kind = 'personal_expense', groupName = '') {
+  clearReceiptSelection();
   document.getElementById('transaction-modal').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
   state.myShareEdited = false;
@@ -407,29 +843,78 @@ function openModal(kind = 'personal', groupName = '') {
   updateSplitPreview();
   setTimeout(() => document.getElementById('description').focus(), 80);
 }
+
+function openTransactionEdit(transactionId) {
+  const tx = state.transactions.find(item => item.id === transactionId);
+  if (!tx || !['personal_expense', 'income', 'balance_adjustment', 'transfer'].includes(tx.kind)) return;
+  state.editingTransactionId = tx.id;
+  openModal(tx.kind);
+  document.getElementById('entry-kind').disabled = true;
+  document.getElementById('modal-title').textContent = 'Edit transaction';
+  document.getElementById('description').value = tx.title;
+  document.getElementById('amount').value = Number(tx.amount).toFixed(2);
+  document.getElementById('date').value = tx.date;
+  document.querySelector('#expense-form button[type="submit"]').innerHTML = 'Save changes <span>→</span>';
+  if (tx.kind === 'transfer') {
+    document.getElementById('source-account').value = tx.sourceAccountId;
+    updateTransferDestinationOptions();
+    document.getElementById('destination-account').value = tx.destinationAccountId;
+  } else {
+    document.getElementById('account').innerHTML = state.accounts.filter(account => account.currency === tx.currency).map(account =>
+      '<option value="' + esc(account.id) + '">' + esc(account.name) + ' · ' + esc(account.currency) + '</option>'
+    ).join('');
+    document.getElementById('account').value = tx.accountId;
+    if (tx.kind === 'personal_expense') document.getElementById('category').value = tx.category;
+    if (tx.kind === 'balance_adjustment') document.getElementById('adjustment-direction').value = tx.adjustmentDirection;
+  }
+}
+
 function closeModal() {
   document.getElementById('transaction-modal').classList.add('hidden');
   document.body.style.overflow = '';
   document.getElementById('expense-form').reset();
+  document.getElementById('entry-kind').disabled = false;
+  state.editingTransactionId = null;
+  clearReceiptSelection();
   document.getElementById('form-error').classList.add('hidden');
   state.myShareEdited = false;
   state.onboardingFinishing = false;
-  setKind('personal');
+  setKind('personal_expense');
+  renderAccounts();
 }
 function openGroupModal() { document.getElementById('group-modal').classList.remove('hidden'); document.body.style.overflow = 'hidden'; document.getElementById('group-form-error').classList.add('hidden'); setTimeout(() => document.getElementById('new-group-name').focus(), 80); }
 function closeGroupModal() { document.getElementById('group-modal').classList.add('hidden'); document.body.style.overflow = ''; document.getElementById('group-form').reset(); document.getElementById('group-form-error').classList.add('hidden'); }
 function setKind(kind) {
+  if (kind === 'personal') kind = 'personal_expense';
+  if (kind === 'shared') kind = 'shared_expense';
   state.entryKind = kind;
-  document.querySelectorAll('.entry-tab').forEach(button => button.classList.toggle('active', button.dataset.entry === kind));
-  document.getElementById('shared-fields').classList.toggle('hidden', kind !== 'shared');
-  document.getElementById('modal-title').textContent = kind === 'shared' ? 'Split an expense' : 'Add a transaction';
+  document.getElementById('entry-kind').value = kind;
+  const shared = kind === 'shared_expense';
+  const transfer = kind === 'transfer';
+  const adjustment = kind === 'balance_adjustment';
+  const expense = kind === 'personal_expense';
+  document.getElementById('shared-fields').classList.toggle('hidden', !shared);
+  document.getElementById('category-field').classList.toggle('hidden', !(expense || shared));
+  document.getElementById('transfer-fields').classList.toggle('hidden', !transfer);
+  document.getElementById('adjustment-fields').classList.toggle('hidden', !adjustment);
+  document.querySelector('.voice-entry').classList.remove('hidden');
+  document.querySelector('.ai-privacy-note').classList.remove('hidden');
+  const titles = { personal_expense:'Add an expense', income:'Record income', transfer:'Transfer between accounts', balance_adjustment:'Adjust an account balance', shared_expense:'Split an expense' };
+  document.getElementById('modal-title').textContent = titles[kind] || 'Add a transaction';
+  document.getElementById('category').required = expense || shared;
+  document.getElementById('source-account').required = transfer;
+  document.getElementById('destination-account').required = transfer;
   syncPayerFields();
-  if (kind === 'shared') updateSplitPreview();
+  if (shared) updateSplitPreview();
 }
 function syncPayerFields() {
-  const other = document.getElementById('shared-payer').value === 'someone-else';
+  const shared = state.entryKind === 'shared_expense';
+  const other = shared && document.getElementById('shared-payer').value === 'someone-else';
   document.getElementById('payer-name-field').classList.toggle('hidden', !other);
-  document.getElementById('account-field').classList.toggle('hidden', state.entryKind === 'shared' && other);
+  const needsAccount = !['shared_expense', 'transfer'].includes(state.entryKind) || (shared && !other);
+  document.getElementById('account-field').classList.toggle('hidden', !needsAccount);
+  document.getElementById('account').required = needsAccount;
+  document.getElementById('account-field').firstChild.textContent = state.entryKind === 'income' ? 'Deposit into' : state.entryKind === 'balance_adjustment' ? 'Account' : 'Paid from';
 }
 function showToast(message) { const toast = document.getElementById('toast'); toast.textContent = message; toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 2600); }
 function updateSplitPreview() {
@@ -490,29 +975,64 @@ async function saveTransaction(event) {
   event.preventDefault();
   const errorBox = document.getElementById('form-error');
   errorBox.classList.add('hidden');
-  const shared = state.entryKind === 'shared';
+  const type = state.entryKind;
+  const shared = type === 'shared_expense';
+  const transfer = type === 'transfer';
   const amount = Math.round(Number(document.getElementById('amount').value) * 100) / 100;
   const mine = Math.round(Number(document.getElementById('my-share').value) * 100) / 100;
   const title = document.getElementById('description').value.trim();
   const category = document.getElementById('category').value;
   const date = document.getElementById('date').value;
+  const account = accountFor(document.getElementById('account').value);
+  const sourceAccount = accountFor(document.getElementById('source-account').value);
+  const destinationAccount = accountFor(document.getElementById('destination-account').value);
   const names = participantNames();
   const groupName = document.getElementById('group-name').value.trim();
   const paidByOther = document.getElementById('shared-payer').value === 'someone-else';
   const payerName = document.getElementById('payer-name').value.trim();
-  const account = accountFor(document.getElementById('account').value);
-  if (!title || !amount || amount <= 0 || !date || (!shared && !account)) { errorBox.textContent = 'Enter the description, amount, date, and a valid account.'; errorBox.classList.remove('hidden'); return; }
+  if (!title || !amount || amount <= 0 || !date || (!shared && !transfer && !account) || (shared && !paidByOther && !account)) { errorBox.textContent = 'Enter the description, amount, date, and a valid account.'; errorBox.classList.remove('hidden'); return; }
+  if (transfer && (!sourceAccount || !destinationAccount || sourceAccount.id === destinationAccount.id || sourceAccount.currency !== destinationAccount.currency)) { errorBox.textContent = 'Choose two different accounts with the same currency. Cross-currency transfers need an exchange-rate rule first.'; errorBox.classList.remove('hidden'); return; }
   if (shared && (!groupName || !names.length || mine <= 0 || mine >= amount || amount - mine < names.length * 0.01 || (paidByOther && !payerName))) { errorBox.textContent = 'Add a group, at least one other person, who paid, and a personal share that leaves at least one cent for each participant.'; errorBox.classList.remove('hidden'); return; }
   const button = document.querySelector('#expense-form button[type="submit"]');
+  const submitLabel = state.editingTransactionId ? 'Save changes →' : 'Save transaction →';
   setBusy(button, true);
   try {
-    if (!shared) {
+    const editing = state.transactions.find(tx => tx.id === state.editingTransactionId);
+    if (state.editingTransactionId && !editing) throw new Error('This transaction is no longer available. Refresh and try again.');
+    if (editing) {
+      let updates;
+      if (transfer) updates = {
+        description:title, occurred_at:date + 'T12:00:00', amount, currency:sourceAccount.currency,
+        source_account_id:sourceAccount.id, destination_account_id:destinationAccount.id,
+        confirmed_at:new Date().toISOString()
+      };
+      else {
+        updates = { description:title, occurred_at:date + 'T12:00:00', amount, currency:account.currency, account_id:account.id, confirmed_at:new Date().toISOString() };
+        if (type === 'personal_expense') updates.category = category;
+        if (type === 'income') updates.category = 'Income';
+        if (type === 'balance_adjustment') {
+          updates.category = 'Balance adjustment';
+          updates.adjustment_direction = document.getElementById('adjustment-direction').value;
+        }
+      }
+      const updated = await db.from('transactions').update(updates).eq('id', editing.id).select('id').single();
+      if (updated.error) throw updated.error;
+      await loadWorkspaceData();
+      renderAll();
+      closeModal();
+      showToast('Transaction updated.');
+      return;
+    }
+    if (transfer) {
       const result = await db.from('transactions').insert({
-        type:'personal_expense', status:'posted', description:title, occurred_at:date + 'T12:00:00', amount,
-        currency:account.currency, category, account_id:account.id, confirmed_at:new Date().toISOString()
-      });
+        type:'transfer', status:'posted', description:title, occurred_at:date + 'T12:00:00', amount,
+        currency:sourceAccount.currency, source_account_id:sourceAccount.id, destination_account_id:destinationAccount.id,
+        capture_source:state.pendingReceipt ? 'receipt' : 'manual', confirmed_at:new Date().toISOString()
+      }).select('id').single();
       if (result.error) throw result.error;
-    } else {
+      try { await attachReceipt(result.data.id); }
+      catch (error) { await db.from('transactions').delete().eq('id', result.data.id); throw error; }
+    } else if (shared) {
       const group = await findOrCreateGroup(groupName, paidByOther ? names.concat([payerName]) : names);
       const memberRows = [];
       for (const name of names) memberRows.push(await upsertMember(group.id, name));
@@ -520,7 +1040,7 @@ async function saveTransaction(event) {
       const created = await db.from('transactions').insert({
         type:'shared_expense', status:'draft', description:title, occurred_at:date + 'T12:00:00', amount,
         currency:account?.currency || 'USD', category, account_id:paidByOther ? null : account.id,
-        group_id:group.id, payer_member_id:payer?.id || null, capture_source:'manual'
+        group_id:group.id, payer_member_id:payer?.id || null, capture_source:state.pendingReceipt ? 'receipt' : 'manual'
       }).select().single();
       if (created.error) throw created.error;
       const transaction = created.data;
@@ -531,8 +1051,26 @@ async function saveTransaction(event) {
       ];
       const splitResult = await db.from('transaction_splits').insert(splitRows);
       if (splitResult.error) { await db.from('transactions').delete().eq('id', transaction.id); throw splitResult.error; }
+      let receiptPath = '';
+      try { receiptPath = await attachReceipt(transaction.id) || ''; }
+      catch (error) { await db.from('transactions').delete().eq('id', transaction.id); throw error; }
       const posted = await db.from('transactions').update({ status:'posted', confirmed_at:new Date().toISOString() }).eq('id', transaction.id);
-      if (posted.error) { await db.from('transactions').delete().eq('id', transaction.id); throw posted.error; }
+      if (posted.error) { await removeReceiptPath(receiptPath); await db.from('transactions').delete().eq('id', transaction.id); throw posted.error; }
+    } else {
+      const row = {
+        type, status:'posted', description:title, occurred_at:date + 'T12:00:00', amount,
+        currency:account.currency, account_id:account.id, capture_source:state.pendingReceipt ? 'receipt' : 'manual', confirmed_at:new Date().toISOString()
+      };
+      if (type === 'personal_expense') row.category = category;
+      if (type === 'income') row.category = 'Income';
+      if (type === 'balance_adjustment') {
+        row.category = 'Balance adjustment';
+        row.adjustment_direction = document.getElementById('adjustment-direction').value;
+      }
+      const result = await db.from('transactions').insert(row).select('id').single();
+      if (result.error) throw result.error;
+      try { await attachReceipt(result.data.id); }
+      catch (error) { await db.from('transactions').delete().eq('id', result.data.id); throw error; }
     }
     await loadWorkspaceData();
     renderAll();
@@ -543,9 +1081,9 @@ async function saveTransaction(event) {
       try { await completeOnboarding(); }
       catch (error) { showToast('Transaction saved. Reopen Help to finish setup.'); return; }
     }
-    showToast(shared ? 'Shared expense saved to Supabase.' : 'Transaction saved to Supabase.');
+    showToast(shared ? 'Shared expense saved to Supabase.' : transfer ? 'Transfer saved to Supabase.' : 'Transaction saved to Supabase.');
   } catch (error) { errorBox.textContent = error.message || 'Could not save this transaction.'; errorBox.classList.remove('hidden'); }
-  finally { setBusy(button, false, 'Save transaction →'); }
+  finally { setBusy(button, false, submitLabel); }
 }
 
 document.getElementById('today-label').textContent = new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' }).toUpperCase();
@@ -581,7 +1119,7 @@ document.getElementById('create-group').addEventListener('click', openGroupModal
 document.getElementById('close-group-modal').addEventListener('click', closeGroupModal);
 document.getElementById('cancel-group-modal').addEventListener('click', closeGroupModal);
 document.getElementById('group-modal').addEventListener('click', event => { if (event.target.id === 'group-modal') closeGroupModal(); });
-document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeGroupModal(); closeAccountModal(); if (!document.getElementById('setup-modal').classList.contains('hidden')) skipSetup(); } });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeGroupModal(); closeAccountModal(); closeSettlementModal(); closeBudgetModal(); if (!document.getElementById('setup-modal').classList.contains('hidden')) skipSetup(); } });
 document.getElementById('group-form').addEventListener('submit', saveGroup);
 document.getElementById('setup-close').addEventListener('click', skipSetup);
 document.getElementById('setup-modal').addEventListener('click', event => {
@@ -598,12 +1136,36 @@ document.getElementById('close-account-modal').addEventListener('click', closeAc
 document.getElementById('cancel-account-modal').addEventListener('click', closeAccountModal);
 document.getElementById('account-modal').addEventListener('click', event => { if (event.target.id === 'account-modal') closeAccountModal(); });
 document.getElementById('account-form').addEventListener('submit', saveAccount);
+document.getElementById('account-list').addEventListener('click', event => {
+  const button = event.target.closest('[data-edit-account]');
+  if (button) openAccountModal(accountFor(button.dataset.editAccount));
+});
+document.getElementById('close-budget-modal').addEventListener('click', closeBudgetModal);
+document.getElementById('cancel-budget-modal').addEventListener('click', closeBudgetModal);
+document.getElementById('budget-modal').addEventListener('click', event => { if (event.target.id === 'budget-modal') closeBudgetModal(); });
+document.getElementById('budget-form').addEventListener('submit', saveBudget);
+document.getElementById('budget-currency').addEventListener('change', () => refreshBudgetCategoryOptions(document.getElementById('budget-category').value));
+document.getElementById('budget-grid').addEventListener('click', event => {
+  const edit = event.target.closest('[data-edit-budget]');
+  const remove = event.target.closest('[data-delete-budget]');
+  if (edit) openBudgetModal(state.budgets.find(budget => budget.id === edit.dataset.editBudget));
+  if (remove) deleteBudget(remove.dataset.deleteBudget);
+});
 document.getElementById('group-list').addEventListener('click', event => {
   if (event.target.closest('[data-create-group]')) openGroupModal();
   const button = event.target.closest('[data-use-group]');
   if (button) openModal('shared', button.dataset.useGroup);
 });
-document.querySelectorAll('.entry-tab').forEach(button => button.addEventListener('click', () => setKind(button.dataset.entry)));
+document.getElementById('friend-list').addEventListener('click', event => {
+  const button = event.target.closest('[data-settle-member]');
+  if (button && !button.disabled) openSettlementModal(button.dataset.settleMember);
+});
+document.getElementById('close-settlement-modal').addEventListener('click', closeSettlementModal);
+document.getElementById('cancel-settlement-modal').addEventListener('click', closeSettlementModal);
+document.getElementById('settlement-modal').addEventListener('click', event => { if (event.target.id === 'settlement-modal') closeSettlementModal(); });
+document.getElementById('settlement-form').addEventListener('submit', saveSettlement);
+document.getElementById('entry-kind').addEventListener('change', event => setKind(event.target.value));
+document.getElementById('source-account').addEventListener('change', updateTransferDestinationOptions);
 document.getElementById('amount').addEventListener('input', updateSplitPreview);
 document.getElementById('friends').addEventListener('input', updateSplitPreview);
 document.getElementById('my-share').addEventListener('input', () => { state.myShareEdited = true; updateSplitPreview(); });
@@ -616,31 +1178,121 @@ document.getElementById('group-name').addEventListener('change', () => {
   updateSplitPreview();
 });
 document.getElementById('expense-form').addEventListener('submit', saveTransaction);
-document.getElementById('transaction-search').addEventListener('input', event => {
-  const query = event.target.value.toLowerCase();
-  const matches = state.transactions.filter(tx => (tx.title + ' ' + tx.category + ' ' + tx.account).toLowerCase().includes(query));
-  document.getElementById('all-transactions').innerHTML = matches.map(rowMarkup).join('') || '<div class="empty-state">No matching transactions.</div>';
+document.getElementById('receipt-file').addEventListener('change', event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 10 * 1024 * 1024) {
+    clearReceiptSelection();
+    showToast('Choose a JPEG, PNG, or WebP image up to 10 MB.');
+    return;
+  }
+  if (state.receiptPreviewUrl) URL.revokeObjectURL(state.receiptPreviewUrl);
+  state.pendingReceipt = file;
+  state.receiptPreviewUrl = URL.createObjectURL(file);
+  document.getElementById('receipt-preview-image').src = state.receiptPreviewUrl;
+  document.getElementById('receipt-file-name').textContent = file.name;
+  document.getElementById('receipt-preview').classList.remove('hidden');
 });
+document.getElementById('remove-receipt').addEventListener('click', clearReceiptSelection);
+document.getElementById('read-receipt').addEventListener('click', readReceiptWithAi);
+for (const listId of ['recent-transactions', 'all-transactions']) document.getElementById(listId).addEventListener('click', event => {
+  const button = event.target.closest('[data-receipt-path]');
+  if (button) openPrivateReceipt(button.dataset.receiptPath);
+  const edit = event.target.closest('[data-edit-transaction]');
+  if (edit) openTransactionEdit(edit.dataset.editTransaction);
+});
+document.getElementById('transaction-search').addEventListener('input', renderTransactions);
+for (const id of ['filter-type', 'filter-currency', 'filter-start-date', 'filter-end-date']) document.getElementById(id).addEventListener('change', renderTransactions);
+document.getElementById('transaction-filters-toggle').addEventListener('click', event => {
+  const panel = document.getElementById('transaction-filters');
+  const expanded = panel.classList.toggle('hidden') === false;
+  event.currentTarget.setAttribute('aria-expanded', String(expanded));
+});
+document.getElementById('clear-transaction-filters').addEventListener('click', () => {
+  document.getElementById('transaction-search').value = '';
+  document.getElementById('filter-type').value = 'all';
+  document.getElementById('filter-currency').value = 'all';
+  document.getElementById('filter-start-date').value = '';
+  document.getElementById('filter-end-date').value = '';
+  renderTransactions();
+});
+document.getElementById('export-transactions').addEventListener('click', exportTransactionsCsv);
 document.getElementById('invite-friend').addEventListener('click', () => showToast('Add people while creating a group or recording a shared expense.'));
 document.getElementById('add-account').addEventListener('click', openAccountModal);
-document.getElementById('add-budget').addEventListener('click', () => showToast('Budgets will be connected after the transaction flow.'));
+document.getElementById('add-budget').addEventListener('click', () => openBudgetModal());
 document.getElementById('learn-more').addEventListener('click', () => showToast('One calm home for your money and your people.'));
 document.getElementById('search-toggle').addEventListener('click', () => { setView('transactions'); document.getElementById('transaction-search').focus(); });
+document.getElementById('spend-currency').addEventListener('change', event => {
+  state.spendCurrency = event.target.value;
+  renderLegend();
+});
 document.getElementById('help-button').addEventListener('click', () => openSetup(0));
+async function suggestTransactionDraft() {
+  const button = document.getElementById('ai-draft-button');
+  const status = document.getElementById('voice-status');
+  const text = document.getElementById('description').value.trim();
+  if (text.length < 4) { status.textContent = 'Enter or dictate a transaction description first.'; document.getElementById('description').focus(); return; }
+  setBusy(button, true, 'Suggest fields');
+  status.textContent = 'Preparing a draft…';
+  try {
+    const result = await db.functions.invoke('parse-transaction', { body: { text } });
+    if (result.error) {
+      let message = result.error.message || 'Could not prepare a draft. Complete the fields manually.';
+      try { message = (await result.error.context.json()).error || message; } catch {}
+      throw new Error(message);
+    }
+    const draft = result.data?.draft;
+    if (!draft) throw new Error('No draft was returned. Complete the fields manually.');
+    if (['personal_expense', 'income', 'transfer', 'balance_adjustment', 'shared_expense'].includes(draft.transactionType)) setKind(draft.transactionType);
+    if (draft.description) document.getElementById('description').value = draft.description;
+    if (Number(draft.amount) > 0) document.getElementById('amount').value = draft.amount;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(draft.date || '')) document.getElementById('date').value = draft.date;
+    if (draft.category && [...document.getElementById('category').options].some(option => option.value === draft.category || option.text === draft.category)) document.getElementById('category').value = draft.category;
+
+    if (draft.currency === 'USD' || draft.currency === 'PEN') {
+      const matchingAccount = state.accounts.find(account => account.currency === draft.currency);
+      if (matchingAccount && draft.transactionType !== 'transfer') document.getElementById('account').value = matchingAccount.id;
+    }
+    if (draft.transactionType === 'transfer') {
+      const source = state.accounts.find(account => account.name.toLowerCase() === (draft.sourceAccountHint || '').toLowerCase());
+      if (source) document.getElementById('source-account').value = source.id;
+      updateTransferDestinationOptions();
+      const destination = state.accounts.find(account => account.name.toLowerCase() === (draft.destinationAccountHint || '').toLowerCase() && account.currency === accountFor(document.getElementById('source-account').value)?.currency);
+      if (destination) document.getElementById('destination-account').value = destination.id;
+    }
+    if (draft.transactionType === 'balance_adjustment' && ['increase', 'decrease'].includes(draft.adjustmentDirection)) document.getElementById('adjustment-direction').value = draft.adjustmentDirection;
+    if (draft.transactionType === 'shared_expense') {
+      if (draft.groupName) document.getElementById('group-name').value = draft.groupName;
+      if (draft.participants?.length) document.getElementById('friends').value = draft.participants.join(', ');
+      if (draft.payer === 'someone_else') {
+        document.getElementById('shared-payer').value = 'someone-else';
+        if (draft.payerName) document.getElementById('payer-name').value = draft.payerName;
+      } else if (draft.payer === 'you') document.getElementById('shared-payer').value = 'you';
+      syncPayerFields();
+      if (Number(draft.ownerShare) > 0) {
+        document.getElementById('my-share').value = draft.ownerShare;
+        state.myShareEdited = true;
+      } else state.myShareEdited = false;
+      updateSplitPreview();
+    }
+    status.textContent = (draft.clarifyingQuestion ? draft.clarifyingQuestion + ' ' : '') + 'Draft filled in. Review every field before saving.';
+  } catch (error) {
+    status.textContent = error.message || 'Could not prepare a draft. Complete the fields manually.';
+  } finally { setBusy(button, false, 'Suggest fields'); }
+}
+document.getElementById('ai-draft-button').addEventListener('click', suggestTransactionDraft);
 document.getElementById('voice-button').addEventListener('click', () => {
   const status = document.getElementById('voice-status');
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) { status.textContent = 'Voice input is not supported in this browser. Type your expense instead.'; return; }
   const recognition = new Recognition();
-  recognition.lang = 'en-US';
+  recognition.lang = navigator.language?.toLowerCase().startsWith('es') ? 'es-ES' : 'en-US';
   recognition.interimResults = false;
   status.textContent = 'Listening…';
   recognition.onresult = event => {
     const phrase = event.results[0][0].transcript;
-    status.textContent = 'Heard: “' + phrase + '” — review the fields before saving.';
-    const amountMatch = phrase.match(/(?:\$\s*)?(\d+(?:\.\d{1,2})?)/);
-    if (amountMatch) document.getElementById('amount').value = amountMatch[1];
-    document.getElementById('description').value = phrase.replace(/(?:\$\s*)?\d+(?:\.\d{1,2})?/, '').replace(/\b(spent|paid|for|on|at|today|yesterday|dollars?)\b/gi, '').replace(/\s+/g, ' ').trim() || phrase;
+    status.textContent = 'Captured. Tap Suggest fields to prepare an editable draft.';
+    document.getElementById('description').value = phrase;
     updateSplitPreview();
   };
   recognition.onerror = () => { status.textContent = 'Could not hear that clearly. Please type the details.'; };

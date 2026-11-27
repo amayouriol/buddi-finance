@@ -1,4 +1,4 @@
-const CACHE_NAME = 'buddi-shell-v1';
+const CACHE_NAME = 'buddi-shell-v11';
 const APP_SHELL = [
   './',
   './index.html',

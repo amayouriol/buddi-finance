@@ -16,6 +16,8 @@ The owner can open Buddi from a phone home-screen icon, record personal and shar
 - Cloud persistence for the owner's profile, personal accounts, transactions, groups, group members, and settlement movements.
 - Guided first use: configure personal accounts, create or skip a group, and record a first transaction. Help can be reopened from the app.
 - Personal ledger entries: expense, income, transfers between personal accounts, and balance adjustments, with date, description, category where applicable, amount, currency, and account(s). Balance adjustments change an account balance but are excluded from income/expense reports.
+- Edit personal account names and opening balances. Lock the currency after any transaction references the account so historical amounts remain consistent.
+- Edit posted personal expenses, income, balance adjustments, and transfers. Shared-expense and settlement corrections need a dedicated flow to keep their linked splits and balances consistent.
 - Shared expense entries: group, total, category, participants, payer, and editable owner share. Default to an equal split.
 - Shared debt tracking and partial or full repayments, reflected as account movements without double-counting as income or expenses.
 - Natural language voice/text and receipt-photo assistance using a free-tier AI experiment, after cloud storage and permissions are in place. AI creates a draft; the owner must review and confirm before a transaction is saved.
@@ -126,10 +128,10 @@ These are hypotheses to validate with the owner, not launch promises:
 1. Validate this behavior and the accounting examples against the owner's export, using anonymized examples in project artifacts.
 2. Finalize the schema, currency/reconciliation approach, SMS provider/country cost, and Supabase security policies.
 3. Build the mobile PWA shell, guided setup, phone auth, and cloud-backed personal ledger.
-4. Add groups, shared payer/split logic, and settlement movements; reconcile acceptance examples.
-5. Add the AI server function and text/voice drafts; then receipt photos and private storage.
+4. Complete groups, shared payer/split logic, and settlement movements; reconcile acceptance examples.
+5. Add the AI server function and text/voice drafts; then receipt photos and private storage. The authenticated text/voice and receipt draft functions, editable forms, and private receipt attachments are now implemented.
 6. Have the owner use it on their phone, fix observed friction, and only commit when the owner asks.
 
 ## Current prototype boundary
 
-The repository now includes an installable PWA shell, guided first-use setup, personal account creation with opening balances, and group plus personal/shared expense flows connected to local Supabase. Local sign-in uses email one-time codes captured by Mailpit as a temporary development path; phone OTP still needs an SMS provider. No hosted project, workbook import, account editing, income, transfers, balance adjustments, settlements, private receipt workflow, or Gemini server function is connected yet.
+The repository now includes an installable PWA shell, guided first-use setup, editable personal accounts, personal and shared expenses, income, same-currency transfers, balance adjustments, monthly category budgets, partial or full settlement recording, editable AI-assisted text/voice/receipt drafts, and private receipt attachments in local Supabase Storage. Account name and opening balance can be edited; a database guard prevents currency changes once transactions reference an account. Budget progress uses personal expenses and the owner's share of shared expenses, separated by currency. Transfers update both accounts without affecting income or spending; adjustments change the balance without entering either report; repayments update the shared balance and account without being counted as income or expense. AI drafts require a user-provided local Gemini key, an explicit send action, and never save automatically. Google free-tier requests may be used to improve products, so prototype evaluation should use sample descriptions and receipts. Local sign-in uses email one-time codes captured by Mailpit as a temporary development path; phone OTP still needs an SMS provider. No hosted project, workbook import, or cross-currency transfers are connected yet.

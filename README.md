@@ -28,6 +28,13 @@ The proposed ledger entities and export mapping are in [DATA_MODEL.md](DATA_MODE
 - Supabase Auth, PostgreSQL, and Row Level Security for local data persistence
 - Guided first-use setup for accounts, optional groups, and a first transaction
 - Personal account creation with currency and starting balance
+- Account editing for name and opening balance; currency locks once an account has transaction history
+- Personal income, same-currency transfers, and balance adjustments in the transaction ledger
+- Partial and full shared-balance repayments, recorded against a personal account without changing expense totals
+- Currency-aware balances and spending charts that keep USD and PEN separate without inventing exchange rates
+- Monthly category budgets in USD or PEN with edit/delete controls and progress based on personal spending plus the owner's share of shared expenses
+- Transaction search and type/currency/date filters, with CSV export of the matching rows
+- Edit posted personal expenses, income, balance adjustments, and transfers; shared expenses and repayments stay locked to protect linked balances
 
 ## Run it
 
@@ -36,10 +43,11 @@ Start Docker Desktop and the local Supabase stack from this repository with `sup
 ## Important prototype boundaries
 
 - First-use setup creates a personal account with its currency and starting balance; if setup is skipped, Buddi creates a zero-balance `Cash` account in USD. No Excel rows are imported.
-- Account editing, income, transfers, balance adjustments, budgets, and settlements are not connected in this slice.
+- Editing an opening balance changes the account's starting point without rewriting transactions. Budgets are monthly and category-based; cross-currency transfers remain unavailable until the exchange-rate rule is defined.
 - Voice recognition support depends on the browser and permission; all fields remain editable.
-- Phone OTP, hosted storage, Gemini or other AI, and receipt capture are not connected yet.
-- Settlement recording and reminders do not send messages or move money.
+- Phone OTP and hosted storage are not connected yet. Receipt images can be attached to a transaction and stored in the local private Supabase bucket. Reading a receipt sends an optimized copy to Gemini only after the user taps **Read receipt**; text and voice suggestions send the description only after the user taps **Suggest fields**. Both require a user-provided local Gemini key.
+- To enable local AI drafts, copy `supabase/functions/.env.example` to `supabase/functions/.env`, add your Gemini API key, and restart the local Supabase stack. Never put the key in browser code or commit the `.env` file. Use sample descriptions and receipts while evaluating: Google's Gemini API free tier may use submitted content to improve its products.
+- Settlement entries track repayments in Buddi; the app does not send messages or move money externally.
 
 ## Product direction
 

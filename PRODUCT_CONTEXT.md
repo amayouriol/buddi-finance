@@ -27,19 +27,20 @@ The user wants fewer taps and eventually wants to record transactions by natural
 ## Capture and AI direction
 
 - Existing voice input is browser speech recognition and is only a prototype convenience; it is not yet a reliable natural-language transaction parser.
-- The planned flow is speech or receipt photo → suggested description, amount, date, category, account, group, payer, and split → owner reviews/edits → save.
+- The planned flow is speech or receipt photo → suggested description, amount, date, category, account, group, payer, and split → owner reviews/edits → save. Receipt photo attachment is private; an explicit Read receipt action sends an optimized image to the AI provider and returns an editable draft.
 - Restaurant conversation capture is a later exploration. It needs a clear, deliberate recording action and should not create expenses without review.
-- The initial AI experiment should use a free-tier provider with synthetic/sample data, no exposed API key in browser code, and no automatic saving of model guesses.
-- A backend or serverless function will be needed before a provider secret can be used safely in a deployed app.
+- The initial AI experiment uses a free-tier provider with synthetic/sample data, no exposed API key in browser code, and no automatic saving of model guesses. The interface warns that free-tier requests may be used to improve provider products.
+- A local authenticated Supabase Edge Function holds the provider secret; a hosted deployment still needs its own secrets, domain CORS policy, and privacy review.
 
 ## Current prototype status
 
 - Static HTML/CSS/JavaScript; the current personal/shared expense slice uses local Supabase, with email OTP through local Mailpit for development.
 - Shared groups can be created separately and reused from the shared-expense view or entry form.
 - Shared-entry form supports payer selection, participants, editable personal share, and a split preview.
-- Saving a shared expense updates the demo ledger and person-level balances locally.
-- Account creation with an opening balance is connected. Dashboard spending summaries, budgets, reminder delivery, and settlement are still incomplete; settlement does not yet create a matching personal-account transaction.
-- Gemini, receipt reading, authentication, multi-user sync, and bank connections are not implemented.
+- Saving personal/shared entries updates the local Supabase ledger and person-level balances.
+- Account creation/editing, monthly category budgets, and partial or full settlement movements are connected. Account name and opening balance can be changed; currency locks after transaction history exists. Budget progress includes personal expenses and the owner's share of shared expenses, by currency. Repayments update the related group balance and selected personal account without changing income or expense totals. Broader dashboard insights remain incomplete; reminder delivery is not connected.
+- Income, same-currency transfers, and balance adjustments are supported in the personal transaction form and can be edited after saving. Shared expenses and settlements still need a linked edit/correction flow. Cross-currency transfer rules remain open.
+- Local email authentication uses Supabase and Mailpit; text/voice and receipt AI drafts use local Edge Functions and require a user-provided key. Receipt images are only sent to the provider after an explicit action. Phone sign-in, multi-user sync, and bank connections are not implemented.
 
 ## Working agreement
 

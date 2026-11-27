@@ -34,6 +34,7 @@ The proposed ledger entities and export mapping are in [DATA_MODEL.md](DATA_MODE
 - Currency-aware balances and spending charts that keep USD and PEN separate without inventing exchange rates
 - Monthly category budgets in USD or PEN with edit/delete controls and progress based on personal spending plus the owner's share of shared expenses
 - Transaction search and type/currency/date filters, with CSV export of the matching rows
+- Local Excel/CSV history preview with normalized expense/income/adjustment rows, paired-transfer checks, and account-mapping warnings; preview does not write to Supabase
 - Edit posted personal expenses, income, balance adjustments, and transfers; shared expenses and repayments stay locked to protect linked balances
 
 ## Run it
@@ -43,6 +44,7 @@ Start Docker Desktop and the local Supabase stack from this repository with `sup
 ## Important prototype boundaries
 
 - First-use setup creates a personal account with its currency and starting balance; if setup is skipped, Buddi creates a zero-balance `Cash` account in USD. No Excel rows are imported.
+- The history-file preview is local and read-only. Historical import is still disabled until account mapping, opening balances, and transfer pairing are confirmed.
 - Editing an opening balance changes the account's starting point without rewriting transactions. Budgets are monthly and category-based; cross-currency transfers remain unavailable until the exchange-rate rule is defined.
 - Voice recognition support depends on the browser and permission; all fields remain editable.
 - Phone OTP and hosted storage are not connected yet. Receipt images can be attached to a transaction and stored in the local private Supabase bucket. Reading a receipt sends an optimized copy to Gemini only after the user taps **Read receipt**; text and voice suggestions send the description only after the user taps **Suggest fields**. Both require a user-provided local Gemini key.

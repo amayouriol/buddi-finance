@@ -7,6 +7,7 @@ const categories = [
   { name: 'Fun', color: '#a18dc2', icon: '✳' }, { name: 'Life style', color: '#94aaa0', icon: '•' },
   { name: 'Utilities', color: '#9aa6b8', icon: '⌁' }, { name: 'Other expense', color: '#b4a28f', icon: '•' }
 ];
+let xlsxLoadPromise = null;
 const money = (amount, currency = 'USD') => new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(amount) || 0);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
 const dateLabel = value => new Date(String(value).slice(0, 10) + 'T12:00:00').toLocaleDateString('en-US', { month:'short', day:'numeric' });
@@ -406,6 +407,273 @@ function exportTransactionsCsv() {
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   showToast(rows.length + ' transactions exported.');
+}
+
+function loadSpreadsheetParser() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (xlsxLoadPromise) return xlsxLoadPromise;
+  xlsxLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+    script.onload = () => {
+      if (window.XLSX) resolve(window.XLSX);
+      else { xlsxLoadPromise = null; reject(new Error('The spreadsheet parser did not load.')); }
+    };
+    script.onerror = () => { xlsxLoadPromise = null; reject(new Error('Could not load the spreadsheet parser. Check your internet connection and try again.')); };
+    document.head.appendChild(script);
+  });
+  return xlsxLoadPromise;
+}
+
+function normalizeImportHeader(value) { return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+function parseImportDate(value, XLSX) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return String(value.getFullYear()).padStart(4, '0') + '-' + String(value.getMonth() + 1).padStart(2, '0') + '-' + String(value.getDate()).padStart(2, '0');
+  if (typeof value === 'number') {
+    const parts = XLSX.SSF.parse_date_code(value);
+    if (parts) return String(parts.y).padStart(4, '0') + '-' + String(parts.m).padStart(2, '0') + '-' + String(parts.d).padStart(2, '0');
+    return '';
+  }
+  const text = String(value ?? '').trim();
+  const iso = text.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (iso) return iso[1] + '-' + String(iso[2]).padStart(2, '0') + '-' + String(iso[3]).padStart(2, '0');
+  const us = text.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})/);
+  if (us) {
+    const year = Number(us[3]) < 100 ? (Number(us[3]) < 70 ? 2000 + Number(us[3]) : 1900 + Number(us[3])) : Number(us[3]);
+    return String(year).padStart(4, '0') + '-' + String(us[1]).padStart(2, '0') + '-' + String(us[2]).padStart(2, '0');
+  }
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? '' : new Date(parsed).toISOString().slice(0, 10);
+}
+
+function parseImportNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  let text = String(value ?? '').trim().replace(/[\s$£€]/g, '');
+  if (!text) return null;
+  const negativeParens = /^\(.*\)$/.test(text);
+  text = text.replace(/[()]/g, '');
+  if (/^-?\d{1,3}(?:\.\d{3})+,\d{1,2}$/.test(text)) text = text.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d+,\d{1,2}$/.test(text) && !text.includes('.')) text = text.replace(',', '.');
+  else text = text.replace(/,/g, '');
+  const number = Number(text);
+  if (!Number.isFinite(number)) return null;
+  return negativeParens ? -Math.abs(number) : number;
+}
+
+function importType(flowValue, categoryValue) {
+  const flow = String(flowValue ?? '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  const category = String(categoryValue ?? '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  if (flow.includes('transferout') || flow === 'outgoingtransfer') return 'transfer_out';
+  if (flow.includes('transferin') || flow === 'incomingtransfer') return 'transfer_in';
+  if (category === 'balanceupdate' || category === 'balanceadjustment') {
+    if (flow.includes('income')) return 'balance_adjustment_increase';
+    if (flow === 'exp' || flow.includes('expense')) return 'balance_adjustment_decrease';
+    return 'unknown';
+  }
+  if (flow.includes('income')) return 'income';
+  if (flow === 'exp' || flow.includes('expense')) return 'personal_expense';
+  return 'unknown';
+}
+
+function findHistorySheet(workbook, XLSX) {
+  const required = ['period', 'incomeexpense', 'amount', 'currency', 'accounts'];
+  for (const sheetName of workbook.SheetNames) {
+    const grid = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header:1, raw:true, defval:'' });
+    for (let rowIndex = 0; rowIndex < Math.min(grid.length, 25); rowIndex++) {
+      const headers = grid[rowIndex].map(normalizeImportHeader);
+      if (required.every(name => headers.includes(name) || (name === 'period' && headers.includes('date')))) {
+        const index = {};
+        headers.forEach((header, column) => { if (header && index[header] === undefined) index[header] = column; });
+        if (index.period === undefined) index.period = index.date;
+        return { sheetName, grid, headerRow:rowIndex, index };
+      }
+    }
+  }
+  return null;
+}
+
+function analyzeHistoryWorkbook(workbook, XLSX) {
+  const located = findHistorySheet(workbook, XLSX);
+  if (!located) throw new Error('Could not find a header row with Period, Income/Expense, Amount, Currency, and Accounts.');
+  const get = (cells, key) => located.index[key] === undefined ? '' : cells[located.index[key]];
+  const sourceRows = [];
+  for (let i = located.headerRow + 1; i < located.grid.length; i++) {
+    const cells = located.grid[i];
+    if (!cells || cells.every(value => String(value ?? '').trim() === '')) continue;
+    const flow = get(cells, 'incomeexpense');
+    const category = get(cells, 'category');
+    const amountValue = parseImportNumber(get(cells, 'amount'));
+    const date = parseImportDate(get(cells, 'period'), XLSX);
+    const currency = String(get(cells, 'currency') ?? '').trim().toUpperCase();
+    const account = String(get(cells, 'accounts') ?? '').trim();
+    const kind = importType(flow, category);
+    const usdAmount = parseImportNumber(get(cells, 'usd'));
+    sourceRows.push({
+      sourceRow:i + 1, date, kind, amount:amountValue === null ? 0 : Math.abs(amountValue), currency,
+      account, category:String(category ?? '').trim(), description:String(get(cells, 'description') ?? '').trim(),
+      note:String(get(cells, 'note') ?? '').trim(),
+      usdAmount:usdAmount !== null && usdAmount > 0 ? usdAmount : null,
+      counterpartCandidates:[String(get(cells, 'category') ?? '').trim(), String(get(cells, 'splitwise') ?? '').trim()].filter(Boolean),
+      issue:!date ? 'date' : amountValue === null || amountValue === 0 ? 'amount' : !['USD', 'PEN'].includes(currency) ? 'currency' : !account ? 'account' : kind === 'unknown' ? 'type' : ''
+    });
+  }
+  const sourceAccounts = [...new Map(sourceRows.filter(row => row.account).map(row => [row.account.toLowerCase(), { name:row.account, currency:row.currency }])).values()];
+  const sourceAccountNames = new Set(sourceAccounts.map(item => item.name.toLowerCase()));
+  for (const row of sourceRows) {
+    row.counterpart = row.counterpartCandidates.find(name => name.toLowerCase() !== row.account.toLowerCase() && sourceAccountNames.has(name.toLowerCase())) || '';
+  }
+
+  const records = [];
+  const needsReview = [];
+  let transferPairCount = 0;
+  const pendingIn = new Set(sourceRows.filter(row => row.kind === 'transfer_in' && !row.issue));
+  for (const row of sourceRows) {
+    if (row.kind === 'transfer_in') { if (row.issue) needsReview.push(row); continue; }
+    if (row.kind === 'transfer_out') {
+      if (row.issue) { needsReview.push(row); continue; }
+      const candidates = [...pendingIn].filter(inRow => !inRow.issue && row.date === inRow.date && row.amount === inRow.amount && row.currency === inRow.currency && row.account.toLowerCase() !== inRow.account.toLowerCase() && (!row.counterpart || row.counterpart.toLowerCase() === inRow.account.toLowerCase()) && (!inRow.counterpart || inRow.counterpart.toLowerCase() === row.account.toLowerCase()) && (row.counterpart || inRow.counterpart) && (!row.note || !inRow.note || row.note.toLowerCase() === inRow.note.toLowerCase()));
+      if (candidates.length !== 1) { needsReview.push({ ...row, issue:candidates.length ? 'ambiguous transfer pair' : 'unpaired transfer' }); continue; }
+      const paired = candidates[0];
+      pendingIn.delete(paired);
+      transferPairCount++;
+      const sourceIsSplitwise = row.account.toLowerCase() === 'splitwise';
+      const destinationIsSplitwise = paired.account.toLowerCase() === 'splitwise';
+      let kind = destinationIsSplitwise ? 'shared_receivable' : sourceIsSplitwise ? 'shared_repayment' : 'transfer';
+      let counterparty = row.note || paired.note;
+      const description = row.description || paired.description || row.note || paired.note;
+      if (kind === 'shared_receivable' && counterparty.toLowerCase() === 'other') counterparty = 'Andres';
+      if (kind === 'shared_repayment' && counterparty.toLowerCase() === 'cashback' && description.toLowerCase().includes('walmart')) { kind = 'expense_refund'; counterparty = ''; }
+      if (['shared_receivable', 'shared_repayment'].includes(kind) && (!counterparty || ['other', 'cashback', 'payment', 'fees'].includes(counterparty.toLowerCase()))) {
+        needsReview.push({ ...row, issue:'Splitwise transfer needs a person mapping' });
+        continue;
+      }
+      records.push({
+        sourceRow:row.sourceRow, date:row.date, kind, description,
+        amount:row.amount, currency:row.currency, account:row.account, destination:paired.account,
+        category:'', usdAmount:row.usdAmount || paired.usdAmount,
+        counterparty:['shared_receivable', 'shared_repayment'].includes(kind) ? counterparty : ''
+      });
+      continue;
+    }
+    if (row.account.toLowerCase() === 'splitwise' && row.kind.startsWith('balance_adjustment') && !row.issue) {
+      records.push({
+        sourceRow:row.sourceRow, date:row.date, kind:'shared_balance_adjustment',
+        description:'Manual balance adjustment (source unknown)', amount:row.amount, currency:row.currency,
+        account:'Splitwise', destination:'', category:'Balance adjustment',
+        adjustmentDirection:row.kind === 'balance_adjustment_increase' ? 'increase' : 'decrease',
+        usdAmount:row.usdAmount, assumption:'Owner identified this as a small adjustment with unknown origin.'
+      });
+      continue;
+    }
+    if (row.account.toLowerCase() === 'splitwise' && row.kind === 'personal_expense' && !row.issue) {
+      records.push({
+        sourceRow:row.sourceRow, date:row.date, kind:'shared_expense_assumed', description:row.description || row.note,
+        amount:row.amount, currency:row.currency, account:'Splitwise', destination:'', category:row.category,
+        counterparty:'Sam', assumption:'Sam is the likely shared counterparty; split needs manual review.', usdAmount:row.usdAmount
+      });
+      continue;
+    }
+    if (row.account.toLowerCase() === 'splitwise') {
+      needsReview.push({ ...row, issue:'Splitwise balance adjustment needs opening-balance review' });
+      continue;
+    }
+    if (row.issue) { needsReview.push(row); continue; }
+    const adjustment = row.kind.startsWith('balance_adjustment');
+    records.push({
+      sourceRow:row.sourceRow, date:row.date, kind:adjustment ? 'balance_adjustment' : row.kind,
+      description:row.description || row.note, amount:row.amount, currency:row.currency, account:row.account,
+      destination:'', category:adjustment ? 'Balance adjustment' : row.category,
+      adjustmentDirection:row.kind === 'balance_adjustment_increase' ? 'increase' : row.kind === 'balance_adjustment_decrease' ? 'decrease' : '',
+      usdAmount:row.usdAmount
+    });
+  }
+  for (const row of pendingIn) needsReview.push({ ...row, issue:'unpaired transfer' });
+
+  const appAccounts = state.accounts.map(account => ({ name:account.name.toLowerCase(), currency:account.currency }));
+  const accountNames = new Map();
+  for (const row of records) {
+    if (row.kind === 'transfer') {
+      if (row.account) accountNames.set(row.account.toLowerCase() + ':' + row.currency, { name:row.account, currency:row.currency });
+      if (row.destination) accountNames.set(row.destination.toLowerCase() + ':' + row.currency, { name:row.destination, currency:row.currency });
+    } else if (row.kind === 'shared_receivable' && row.account) {
+      accountNames.set(row.account.toLowerCase() + ':' + row.currency, { name:row.account, currency:row.currency });
+    } else if (row.kind === 'shared_repayment' && row.destination) {
+      accountNames.set(row.destination.toLowerCase() + ':' + row.currency, { name:row.destination, currency:row.currency });
+    } else if (row.kind === 'expense_refund' && row.destination) {
+      accountNames.set(row.destination.toLowerCase() + ':' + row.currency, { name:row.destination, currency:row.currency });
+    } else if (!['shared_expense_assumed', 'shared_balance_adjustment'].includes(row.kind) && row.account) {
+      accountNames.set(row.account.toLowerCase() + ':' + row.currency, { name:row.account, currency:row.currency });
+    }
+  }
+  const unmatchedAccounts = [...accountNames.values()].filter(source => !appAccounts.some(current => current.name === source.name.toLowerCase() && current.currency === source.currency));
+  const knownCategories = new Set(categories.map(item => item.name.toLowerCase()));
+  const possibleDuplicates = [];
+  for (let i = 0; i < records.length; i++) for (let j = i + 1; j < records.length; j++) {
+    const first = records[i], second = records[j];
+    const firstAccount = first.kind === 'expense_refund' ? first.destination : first.account;
+    const secondAccount = second.kind === 'expense_refund' ? second.destination : second.account;
+    if ((first.kind === 'income' && second.kind === 'expense_refund' || first.kind === 'expense_refund' && second.kind === 'income') && first.date === second.date && first.currency === second.currency && firstAccount?.toLowerCase() === secondAccount?.toLowerCase() && first.description.trim().toLowerCase() === second.description.trim().toLowerCase() && Math.abs(first.amount - second.amount) <= 0.02) possibleDuplicates.push({ first:first.sourceRow, second:second.sourceRow, description:first.description });
+  }
+  const unknownCategories = [...new Set(records.filter(row => row.kind === 'personal_expense' || row.kind === 'income' || row.kind === 'shared_expense_assumed').map(row => row.category).filter(category => category && !knownCategories.has(category.toLowerCase())))];
+  return {
+    sheetName:located.sheetName, sourceRowCount:sourceRows.length, records, needsReview,
+    transferPairCount,
+    assumedSamExpenseCount:records.filter(row => row.kind === 'shared_expense_assumed').length,
+    possibleDuplicates,
+    snapshotCount:records.filter(row => row.usdAmount !== null).length,
+    unmatchedAccounts, unknownCategories,
+    duplicateHeaderIgnored:located.index.accounts1 !== undefined
+  };
+}
+
+function renderHistoryPreview(preview, fileName) {
+  document.getElementById('history-preview-filename').textContent = fileName + ' · worksheet: ' + preview.sheetName;
+  document.getElementById('history-summary').innerHTML = [
+    [preview.sourceRowCount, 'Source rows'],
+    [preview.records.length, 'Mapped records'],
+    [preview.transferPairCount, 'Paired transfers'],
+    [preview.needsReview.length, 'Rows needing review']
+  ].map(([value, label]) => '<div class="history-summary-item"><strong>' + esc(value) + '</strong><small>' + esc(label) + '</small></div>').join('');
+  const warnings = [];
+  if (preview.duplicateHeaderIgnored) warnings.push('The duplicate Accounts.1 column is ignored.');
+  if (preview.unmatchedAccounts.length) warnings.push('Accounts needing a mapping: ' + preview.unmatchedAccounts.map(item => esc(item.name + ' (' + item.currency + ')')).join(', ') + '.');
+  if (preview.needsReview.length) warnings.push(preview.needsReview.length + ' source rows need review, including invalid values or transfer legs that could not be paired.');
+  if (preview.needsReview.length) warnings.push('Rows to inspect: ' + preview.needsReview.slice(0, 12).map(row => 'row ' + row.sourceRow + ' (' + row.issue + ')').map(esc).join(', ') + (preview.needsReview.length > 12 ? ', …' : '') + '.');
+  if (preview.unknownCategories.length) warnings.push('Categories needing a mapping: ' + preview.unknownCategories.map(esc).join(', ') + '.');
+  if (preview.snapshotCount) warnings.push(preview.snapshotCount + ' records have a historical USD value; the preview preserves the source values and does not recalculate exchange rates.');
+  if (preview.assumedSamExpenseCount) warnings.push(preview.assumedSamExpenseCount + ' expenses from the Splitwise pseudo-account are provisionally assigned to Sam at your direction. Their exact split still needs review before import.');
+  if (preview.possibleDuplicates.length) warnings.push('Possible duplicate income/refund rows: ' + preview.possibleDuplicates.map(item => 'rows ' + item.first + ' and ' + item.second + ' (' + esc(item.description) + ')').join(', ') + '. They differ by only a few cents; confirm before import.');
+  warnings.push('Named transfers to/from Splitwise are treated as shared balances owed to you or repayments. Opening balances and duplicate detection also need review.');
+  document.getElementById('history-warnings').innerHTML = warnings.map(message => '<p>' + message + '</p>').join('');
+  document.getElementById('history-preview-rows').innerHTML = preview.records.slice(0, 30).map(row => {
+    const typeLabel = row.kind === 'balance_adjustment' ? 'Balance adjustment · ' + row.adjustmentDirection : row.kind === 'shared_balance_adjustment' ? 'Shared balance adjustment · ' + row.adjustmentDirection : row.kind === 'shared_receivable' ? 'Shared balance · owed to you' : row.kind === 'shared_repayment' ? 'Shared repayment received' : row.kind === 'expense_refund' ? 'Purchase refund' : row.kind === 'shared_expense_assumed' ? 'Shared expense · assumed Sam' : row.kind.replace(/_/g, ' ');
+    const accountLabel = row.kind === 'transfer' ? row.account + ' → ' + row.destination : row.kind === 'shared_receivable' ? row.account + ' → shared balance (' + row.counterparty + ' owes you)' : row.kind === 'shared_repayment' ? 'shared balance → ' + row.destination + ' (' + row.counterparty + ' paid you)' : row.kind === 'expense_refund' ? 'Splitwise → ' + row.destination + ' (Walmart refund)' : row.kind === 'shared_expense_assumed' ? 'Splitwise pseudo-account · ' + row.counterparty + ' (review split)' : row.kind === 'shared_balance_adjustment' ? 'Splitwise shared balance' : row.account;
+    return '<tr><td>' + esc(row.sourceRow) + '</td><td>' + esc(row.date) + '</td><td>' + esc(typeLabel) + '</td><td>' + esc(row.description || '(no description)') + '</td><td>' + esc(Number(row.amount).toFixed(2)) + '</td><td>' + esc(accountLabel) + ' · ' + esc(row.currency) + '</td></tr>';
+  }).join('') || '<tr><td colspan="6">No rows could be mapped.</td></tr>';
+}
+
+async function previewHistoryFile(file) {
+  document.getElementById('history-preview-modal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  document.getElementById('history-preview-filename').textContent = file.name;
+  document.getElementById('history-summary').innerHTML = '<p>Reading the selected file locally…</p>';
+  document.getElementById('history-warnings').innerHTML = '';
+  document.getElementById('history-preview-rows').innerHTML = '';
+  try {
+    if (file.size > 25 * 1024 * 1024) throw new Error('Choose a file smaller than 25 MB.');
+    const XLSX = await loadSpreadsheetParser();
+    const workbook = XLSX.read(await file.arrayBuffer(), { cellDates:true });
+    renderHistoryPreview(analyzeHistoryWorkbook(workbook, XLSX), file.name);
+  } catch (error) {
+    document.getElementById('history-summary').innerHTML = '<div class="history-import-error">' + esc(error.message || 'Could not read this file.') + '</div>';
+    document.getElementById('history-warnings').innerHTML = '<p>Nothing was uploaded or saved. Check that this is the original export or an Excel/CSV copy of it.</p>';
+  }
+}
+
+function closeHistoryPreview() {
+  document.getElementById('history-preview-modal').classList.add('hidden');
+  document.body.style.overflow = '';
+  document.getElementById('history-file').value = '';
 }
 function personalSpend(tx) { return tx.kind === 'shared' ? tx.mine : tx.kind === 'personal_expense' ? tx.amount : 0; }
 
@@ -1111,6 +1379,12 @@ document.querySelectorAll('.nav-item,[data-view]').forEach(button => button.addE
 document.getElementById('mobile-menu').addEventListener('click', () => document.getElementById('sidebar').classList.toggle('open'));
 document.getElementById('add-expense').addEventListener('click', () => openModal());
 document.getElementById('add-expense-transactions').addEventListener('click', () => openModal());
+document.getElementById('upload-history').addEventListener('click', () => document.getElementById('history-file').click());
+document.getElementById('history-file').addEventListener('change', event => {
+  const file = event.target.files?.[0];
+  if (file) previewHistoryFile(file);
+  event.target.value = '';
+});
 document.getElementById('add-shared-expense').addEventListener('click', () => openModal('shared'));
 document.getElementById('close-modal').addEventListener('click', closeModal);
 document.getElementById('cancel-modal').addEventListener('click', closeModal);
@@ -1119,7 +1393,7 @@ document.getElementById('create-group').addEventListener('click', openGroupModal
 document.getElementById('close-group-modal').addEventListener('click', closeGroupModal);
 document.getElementById('cancel-group-modal').addEventListener('click', closeGroupModal);
 document.getElementById('group-modal').addEventListener('click', event => { if (event.target.id === 'group-modal') closeGroupModal(); });
-document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeGroupModal(); closeAccountModal(); closeSettlementModal(); closeBudgetModal(); if (!document.getElementById('setup-modal').classList.contains('hidden')) skipSetup(); } });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeGroupModal(); closeAccountModal(); closeSettlementModal(); closeBudgetModal(); closeHistoryPreview(); if (!document.getElementById('setup-modal').classList.contains('hidden')) skipSetup(); } });
 document.getElementById('group-form').addEventListener('submit', saveGroup);
 document.getElementById('setup-close').addEventListener('click', skipSetup);
 document.getElementById('setup-modal').addEventListener('click', event => {
@@ -1151,6 +1425,9 @@ document.getElementById('budget-grid').addEventListener('click', event => {
   if (edit) openBudgetModal(state.budgets.find(budget => budget.id === edit.dataset.editBudget));
   if (remove) deleteBudget(remove.dataset.deleteBudget);
 });
+document.getElementById('close-history-preview').addEventListener('click', closeHistoryPreview);
+document.getElementById('dismiss-history-preview').addEventListener('click', closeHistoryPreview);
+document.getElementById('history-preview-modal').addEventListener('click', event => { if (event.target.id === 'history-preview-modal') closeHistoryPreview(); });
 document.getElementById('group-list').addEventListener('click', event => {
   if (event.target.closest('[data-create-group]')) openGroupModal();
   const button = event.target.closest('[data-use-group]');

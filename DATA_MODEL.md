@@ -1,27 +1,31 @@
 # Buddi data model proposal
 
-Status: initial schema migration applied successfully to the local Supabase stack. The model is still a draft pending review of the open currency and import decisions below; no workbook rows have been imported and no hosted Supabase project is connected. See [SQL migration](supabase/migrations/202611080001_initial_schema.sql).
+Status: initial schema migration applied successfully to the local Supabase stack. A browser-local, read-only workbook preview now checks the proposed mapping, but no workbook rows have been imported and no hosted Supabase project is connected. Review the open currency, account-mapping, and duplicate-handling decisions below before enabling writes. See [SQL migration](supabase/migrations/202611080001_initial_schema.sql).
 
-## What the existing export tells us
+## What the reviewed exports tell us
 
-The workbook has 316 rows, including personal expense/income records and paired transfer rows. It contains USD and PEN, a native `Amount`/`Currency` pair, and a separate USD-equivalent field. The export's `Description` and `Subcategory` fields are often blank.
+The newly supplied 2026 workbook has 406 source rows, including personal expense/income records and 75 mirrored transfer pairs. An earlier reviewed workbook had 316 rows and 58 pairs, so counts vary by export period. The 2026 file contains USD and PEN, a native `Amount`/`Currency` pair, a separate USD-equivalent field, and a `Note` column; `Description` and `Subcategory` are often blank.
 
 | Existing export field / pattern | Meaning for the new model |
 |---|---|
 | `Period` | Transaction date/time (`occurred_at`). |
 | `Income/Expense = Exp.` | Personal expense, unless the row is a balance correction that needs separate treatment. |
 | `Income/Expense = Income` | Personal income. |
-| `Transfer-Out` + `Transfer-In` | Two mirrored account legs for one transfer. The current export has 58 of each (58 pairs). Store one canonical transfer with source and destination account IDs; create both account balance effects from that record. |
+| `Transfer-Out` + `Transfer-In` | Two mirrored account legs for one transfer. The 2026 export has 75 of each (75 pairs); the earlier export had 58 pairs. Store one canonical transfer with source and destination account IDs; create both account balance effects from that record. |
 | `Accounts` and `Category` on transfer rows | The row's account and its counterpart account, rather than an expense category. Normalize these into `source_account_id` and `destination_account_id`. |
 | `Category` on expense/income rows | Expense/income category. Keep category and account as separate fields. |
+| `Note` | Preserve as a memo or fallback description when `Description` is blank. When both legs have a note, equal notes disambiguate same-date, same-amount transfer pairs. In the 2026 export this uniquely resolves three otherwise ambiguous pairs. |
+| `Splitwise` pseudo-account | It is a clearing representation for shared balances, not a personal cash account. A transfer from a personal account to `Splitwise` with a person's name in `Note` increases the amount that person owes the owner; the reverse direction records a repayment and reduces that receivable. Store one shared-balance movement per mirrored pair. Owner mapped `Other` to Andres and identified the Walmart cashback transfer as a purchase refund. |
+| Expenses recorded to `Splitwise` | Owner asked to provisionally assign these to Sam for the prototype. Preserve each full bill amount as a shared-expense draft and flag the participant split for manual adjustment; do not infer Sam's exact share from the export. |
+| `Balance Update` on `Splitwise` | Owner identified the 2026 +$25.09 row as a manual shared-balance adjustment with unknown origin. Preserve its direction and reason; the shared-ledger adjustment needs a supported database transaction type before import. |
 | `Amount` + `Currency` | Original amount and currency. Preserve the source values exactly. |
 | `USD` | USD-equivalent snapshot. Preserve it as a historical converted value; do not recompute historical values using today's exchange rate. |
 | `Balance Update` category | Owner confirmed this is an account-balance adjustment, separate from income and expense reporting. Normalize as `balance_adjustment`; preserve the source row's direction (`Income` increases the account, `Exp.` decreases it) while excluding it from income/expense totals. |
-| `Splitwise` on transfer rows | A counterpart account label in the old export. It does not identify the group, members, or each person's share, so it cannot be converted into detailed group history without more source data. |
+| `Splitwise` on older transfer exports | A counterpart account label. It does not identify the group, members, or each person's share by itself. The 2026 export does not contain a `Splitwise` column; its pseudo-account appears in `Accounts`, with the transfer counterpart in `Category`. |
 | `Accounts.1` | A second field with a duplicate header and numeric values. Its business meaning is unclear; exclude from the canonical model until the owner explains it. |
 | `Subcategory` | Empty in the reviewed export; make optional and do not require it for the MVP. |
 
-For the mirrored transfer pairs, date, direction, account pair, native amount, currency, and USD-equivalent values reconcile in the reviewed export. This supports saving a transfer once and applying one debit plus one credit.
+For the 2026 workbook, date, direction, account pair, native amount, currency, and USD-equivalent values reconcile across all 75 transfer pairs. The three pairs sharing the same date and amount are distinguishable by matching `Note` values. This supports saving each transfer once and applying one debit plus one credit, subject to confirming account mappings and opening balances.
 
 ## Entity relationships
 
@@ -101,6 +105,7 @@ Use an exact decimal type in the database, not binary floating point. The initia
 
 - Personal expense: debit its selected account; add the full amount to expense reporting.
 - Personal income: credit its selected account; add the full amount to income reporting.
+- Purchase refund: credit the account and reduce expense reporting when matched to the original purchase; do not count the refund as ordinary income. The workbook's Walmart refund is one cent different from a same-day Walmart cashback income row, so duplicate review is required.
 - Transfer: debit the source account and credit the destination account; affect neither income nor expense reporting.
 - Balance adjustment: increase or decrease the selected account using the recorded direction; affect neither income nor expense reporting.
 - Shared bill paid by owner: debit the selected account by the full bill; report only the owner's split as personal expense; add other participants' shares to receivables.

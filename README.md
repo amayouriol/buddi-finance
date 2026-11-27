@@ -3,9 +3,6 @@
 **Your budget, with a buddy.**
 
 Buddi is an early-stage portfolio prototype exploring a single experience for everyday budgeting and friend-to-friend expense sharing. The goal is to make personal transactions, shared bills, and who-owes-whom balances feel like one coherent picture.
-![Buddi product concept preview showing a personal money overview, shared expense split, and review-before-saving capture flow](assets/buddi-concept-preview.svg)
-
-This repository contains a browser-based interface prototype for exploring the product concept and its core personal and shared expense workflows.
 
 ## Prototype features
 
@@ -23,7 +20,7 @@ Open `index.html` in a modern browser. For the best experience, serve the folder
 
 ## Important prototype boundaries
 
-- Demo data only; no real financial accounts are connected.
+- Demo data only; this prototype is not connected to a bank, Money Manager, or Splitwise.
 - Records are stored in the current browser only and can be cleared through browser storage settings.
 - Voice recognition support depends on the browser and permission; all fields remain editable.
 - Friend reminders, account creation, budgets, authentication, and real settlement transfers are illustrative UI only.
@@ -35,3 +32,4 @@ The intended product model keeps personal financial accounts and categories sepa
 ## Stack
 
 Vanilla HTML, CSS, and JavaScript. No third-party runtime dependencies.
+

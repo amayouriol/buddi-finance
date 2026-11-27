@@ -1,0 +1,20 @@
+{
+  "id": "./",
+  "name": "Buddi — Budgeting, together",
+  "short_name": "Buddi",
+  "description": "Your budget and shared expenses, together in one place.",
+  "lang": "en",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F4F6F8",
+  "theme_color": "#F4F6F8",
+  "icons": [
+    {
+      "src": "assets/buddi-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
